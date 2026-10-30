@@ -7,12 +7,26 @@ on:
     branches: [ master, main ]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 180
     defaults:
       run:
         shell: msys2 {0}
+
+    # 任务级环境变量: make packages / check_dependencies.sh / 编译步骤都能读到
+    env:
+      QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY: "1"   # 本次失败的直接修复
+      INCLUDE_FAUSTDEV: "0"
+      INCLUDE_FAUSTDEV_BUT_NOT_LLVM: "0"
+      FAUST_USES_LLVM: "0"
+      INCLUDE_PDDEV: "0"
+      INCLUDE_PD2DEV: "0"
 
     steps:
       - name: 检出代码仓库
@@ -21,8 +35,6 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # MSYS2 只装工具链 + Qt6 + 系统库。
-      # 已删除 python2（MSYS2 已移除）和 mingw-w64-x86_64-guile（不存在且不需要）。
       - name: 初始化 MSYS2 与 MinGW64 工具链
         uses: msys2/setup-msys2@v2
         with:
@@ -31,13 +43,7 @@ jobs:
           cache: true
           suppress-deprecation-warnings: msystem-mingw64
           install: >-
-            base-devel
-            git
-            dos2unix
-            patch
-            tar
-            unzip
-            curl
+            base-devel git dos2unix patch tar unzip curl
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-qt6-base
             mingw-w64-x86_64-qt6-svg
@@ -52,9 +58,16 @@ jobs:
             mingw-w64-x86_64-boost
             mingw-w64-x86_64-dlfcn
 
+      # 关键修复: 补丁前把源码与 .diff 统一为 LF,消除 "different line endings";
+      # 补丁失败不再吞掉,直接报错终止(它们是 MinGW 编译必需的修复)
       - name: 探测并应用 JUCE 与 MinGW 专用补丁
         run: |
           set -eo pipefail
+          echo "== 统一行尾为 LF =="
+          find pluginhost -type f $$ -name '*.h' -o -name '*.hpp' -o -name '*.cpp' -o -name '*.c' -o -name '*.diff' $$ \
+            -exec dos2unix {} + >/dev/null 2>&1 || true
+
+          FAILED=""
           for p in \
             pluginhost/mingw_compilation_fix2.diff \
             pluginhost/mingw_compilation_fix_native_message_box.diff \
@@ -62,12 +75,39 @@ jobs:
             pluginhost/radium_midi_message_rt_alloc.diff \
             pluginhost/vst_dont_effopen_in_findAllTypesForFile_juce_issue_811.diff
           do
-            if [ -f "$p" ]; then
-              patch -p1 -N -i "$p" || echo "注意: $p 未应用(可能已被上游合并)"
+            [ -f "$p" ] || { echo "跳过(文件不存在): $p"; continue; }
+            dos2unix "$p" >/dev/null 2>&1 || true
+            if out=$(patch -p1 -N -i "$p" 2>&1); then
+              echo "$out"; echo "OK 已应用: $p"
+            else
+              echo "$out"
+              if echo "$out" | grep -qi 'Skipping patch'; then
+                echo "OK 已包含(可能已被上游合并): $p"
+              else
+                echo "::error::补丁未能应用: $p"
+                FAILED="$FAILED $p"
+              fi
             fi
           done
+          find pluginhost -name '*.rej' -delete >/dev/null 2>&1 || true
+          if [ -n "$FAILED" ]; then echo "::error::补丁失败:${FAILED}"; exit 1; fi
 
-      # 依赖构建产物缓存，二次构建可省掉 python2.7/gc/QScintilla 的编译时间
+      # VST2 SDK: 你已把 pluginterfaces/vst2.x 与 public.sdk/source/vst2.x 放在仓库根目录
+      # -I$(pwd) 让 #include <pluginterfaces/vst2.x/aeffect.h> 可解析(编译步骤已加)
+      # 同时构造 VST2_SDK 布局,兼容构建系统按 SDK 目录结构查找
+      - name: 配置 VST SDK 头文件布局
+        run: |
+          set -eo pipefail
+          test -f pluginterfaces/vst2.x/aeffect.h
+          test -f pluginterfaces/vst2.x/aeffectx.h
+          VSTSDK="$(pwd)/.vsdk"
+          mkdir -p "$VSTSDK/VST2_SDK" "$VSTSDK/VST3_SDK"
+          cp -a pluginterfaces "$VSTSDK/VST2_SDK/"
+          cp -a public.sdk "$VSTSDK/VST2_SDK/"
+          echo "VSTSDK=$VSTSDK" >> "$GITHUB_ENV"
+          echo "== VST 文件清单 =="
+          ls pluginterfaces/vst2.x/ public.sdk/source/vst2.x/
+
       - name: 缓存捆绑依赖构建产物
         uses: actions/cache@v4
         with:
@@ -79,22 +119,18 @@ jobs:
             bin/packages/libgig
           key: radium-deps-mingw64-${{ hashFiles('bin/packages/build.sh', 'bin/packages/build_python27.sh', 'Makefile.Qt') }}
 
-      # 官方依赖构建入口：python2.7 -> bin/packages/python27_install，
-      # gc-8.2.8 / QScintilla_src-2.14.0 / fluidsynth-1.1.6 / s7 / libgig 等均从仓库自带 tarball 构建
       - name: 构建捆绑依赖 (make packages)
         run: |
           set -eo pipefail
-          export INCLUDE_FAUSTDEV=0
-          export INCLUDE_FAUSTDEV_BUT_NOT_LLVM=0
-          export FAUST_USES_LLVM=0
-          export INCLUDE_PDDEV=0
-          export INCLUDE_PD2DEV=0
+          echo "QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=${QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY:-未设置!}"
           export MY_CC=gcc
           export MY_CPP=g++
           make packages
           echo "== 环境自检 =="
           gcc --version | head -n1
-          qmake-qt6 -v 2>/dev/null || qmake -v
+          (qmake-qt6 -v || qmake -v) 2>/dev/null || true
+          pkg-config --libs-only-L Qt6Core || true
+          echo "(以上输出为空属正常,已由 QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=1 豁免)"
           PY=$(./find_python_path.sh) && "$PY" -V
           ls -la bin/packages/python27_install/bin
 
@@ -110,21 +146,23 @@ jobs:
           export FAUST_USES_LLVM=0
           export INCLUDE_PDDEV=0
           export INCLUDE_PD2DEV=0
-          export QMAKE=$(which qmake-qt6 2>/dev/null || which qmake)
-          export MOC=$(which moc-qt6 2>/dev/null || which moc)
-          export UIC=$(which uic-qt6 2>/dev/null || which uic)
-          export QSB=$(which qsb-qt6 2>/dev/null || which qsb)
-          export PKGqt="pkg-config"
           export QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=1
-          export PYTHONEXE="$(pwd)/bin/packages/python27_install/bin/python"
-          "$PYTHONEXE" -V
+          export QMAKE=$(command -v qmake-qt6 || command -v qmake)
+          export MOC=$(command -v moc-qt6 || command -v moc)
+          export UIC=$(command -v uic-qt6 || command -v uic)
+          export QSB=$(command -v qsb-qt6 || command -v qsb)
+          [ -n "$QMAKE" ] && [ -n "$MOC" ] && [ -n "$UIC" ] && [ -n "$QSB" ] \
+            || { echo "::error::Qt 工具探测失败: QMAKE=$QMAKE MOC=$MOC UIC=$UIC QSB=$QSB"; exit 1; }
+          export PKGqt="pkg-config"
+          export PYTHONEXE="$(./find_python_path.sh)"
+          echo "PYTHONEXE=$PYTHONEXE"; "$PYTHONEXE" -V
           export OBJ_X11=""
           export OBJ_MACOSX=""
           export RADIUM_TMP_BIN_DIR="$(pwd)/bin"
           export RADIUM_TMP_OBJ_DIR="$(pwd)/build_objects"
           export T="${RADIUM_TMP_OBJ_DIR}/"
           mkdir -p "${RADIUM_TMP_OBJ_DIR}"
-          export OS_OPTS="-Werror=array-bounds -msse2 -mfpmath=sse -DFOR_WINDOWS -D__WINDOWS_MM__ -DTHREADED_OPENGL=0"
+          export OS_OPTS="-I$(pwd) -Werror=array-bounds -msse2 -mfpmath=sse -DFOR_WINDOWS -D__WINDOWS_MM__ -DTHREADED_OPENGL=0"
           WIN_SYS_LIBS="-lcomdlg32 -limm32 -lole32 -loleaut32 -lrpcrt4 -lshlwapi -luuid -lversion -lwininet -lwinmm -lws2_32 -lwsock32 -lgdi32 -luser32 -lkernel32 -lcomctl32 -lsetupapi -lksuser -ldxgi -ldl"
           export OS_LDFLAGS="${WIN_SYS_LIBS}"
           make api/s7_types.h buildtype.opt flagopts.opt api/radium_proc.h common/keyboard_sub_ids.h --stop
@@ -139,15 +177,13 @@ jobs:
           rm -rf release_package/packages release_package/*.temp_log
           EXE=""
           for cand in release_package/radium.bin.exe release_package/radium.exe release_package/radium.bin; do
-            if [ -f "$cand" ]; then EXE="$cand"; break; fi
+            [ -f "$cand" ] && EXE="$cand" && break
           done
           echo "目标可执行文件: ${EXE:-未找到}"
           [ -n "$EXE" ] || exit 1
-          windeployqt --release --no-translations "$EXE" || echo "windeployqt 未执行成功，改用手动收集 Qt DLL"
-          # Python 2.7 运行时（内嵌解释器）
+          windeployqt --release --no-translations "$EXE" || echo "::warning::windeployqt 未成功,改用手动收集"
           cp -f bin/packages/python27_install/bin/*.dll release_package/ 2>/dev/null || true
           cp -f bin/packages/python27_install/lib/*.dll release_package/ 2>/dev/null || true
-          # MinGW 运行时与常见传递依赖
           find /mingw64/bin $$ \
               -name "libgcc_s_seh-1.dll" -o -name "libstdc++-6.dll" -o -name "libwinpthread-1.dll" \
               -o -name "libgomp-*.dll" -o -name "libsndfile-1.dll" -o -name "libsamplerate-0.dll" \
@@ -156,8 +192,6 @@ jobs:
               -o -name "libFLAC*.dll" -o -name "libopus-0.dll" -o -name "libmpg123-*.dll" \
               -o -name "libmp3lame-*.dll" \
             $$ -exec cp -f {} release_package/ \;
-          # 可选：逐个核对导入表，缺啥补啥
-          # pacman -S mingw-w64-x86_64-ntldd && ntldd -R "$EXE"
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
