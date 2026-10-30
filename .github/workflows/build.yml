@@ -1,0 +1,145 @@
+name: Build Radium Windows Full Version
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: 检出代码仓库
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: 初始化 MSYS2 与 MinGW64 工具链
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            base-devel
+            git
+            dos2unix
+            patch
+            tar
+            mingw-w64-x86_64-toolchain
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-svg
+            mingw-w64-x86_64-qt6-shadertools
+            mingw-w64-x86_64-qt6-5compat
+            mingw-w64-x86_64-libsndfile
+            mingw-w64-x86_64-libsamplerate
+            mingw-w64-x86_64-liblo
+            mingw-w64-x86_64-freetype
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-boost
+            mingw-w64-x86_64-guile
+            mingw-w64-x86_64-fluidsynth
+            mingw-w64-x86_64-dlfcn
+            python2
+
+      - name: 动态嗅探并配置 Python 2.7 运行环境
+        run: |
+          SYS_PYTHON2=$(which python2.7 2>/dev/null || which python2 2>/dev/null || which /usr/bin/python2.7 2>/dev/null || which /usr/bin/python2 2>/dev/null)
+          echo "探测到 Python 解释器路径: ${SYS_PYTHON2}"
+          mkdir -p bin/packages/python27_install/bin
+          mkdir -p bin/packages/python27_install/lib
+          mkdir -p bin/packages/python27_install/include
+          cp -f "${SYS_PYTHON2}" bin/packages/python27_install/bin/python
+          cp -f "${SYS_PYTHON2}" bin/packages/python27_install/bin/python.exe
+          PY_PREFIX=$("${SYS_PYTHON2}" -c "import sys; print(sys.prefix)")
+          if [ -d "${PY_PREFIX}/include/python2.7" ]; then cp -rf "${PY_PREFIX}/include/python2.7" bin/packages/python27_install/include/; fi
+          if [ -d "${PY_PREFIX}/lib/python2.7" ]; then cp -rf "${PY_PREFIX}/lib/python2.7" bin/packages/python27_install/lib/; fi
+          find "${PY_PREFIX}/lib" -maxdepth 1 -name "*python2.7*" -exec cp -rf {} bin/packages/python27_install/lib/ \;
+
+      - name: 探测并应用 JUCE 与 MinGW 专用补丁
+        run: |
+          if [ -f pluginhost/mingw_compilation_fix2.diff ]; then patch -p1 -N -i pluginhost/mingw_compilation_fix2.diff || true; fi
+          if [ -f pluginhost/mingw_compilation_fix_native_message_box.diff ]; then patch -p1 -N -i pluginhost/mingw_compilation_fix_native_message_box.diff || true; fi
+          if [ -f pluginhost/mingw_compilation_fix_timer.diff ]; then patch -p1 -N -i pluginhost/mingw_compilation_fix_timer.diff || true; fi
+          if [ -f pluginhost/radium_midi_message_rt_alloc.diff ]; then patch -p1 -N -i pluginhost/radium_midi_message_rt_alloc.diff || true; fi
+          if [ -f pluginhost/vst_dont_effopen_in_findAllTypesForFile_juce_issue_811.diff ]; then patch -p1 -N -i pluginhost/vst_dont_effopen_in_findAllTypesForFile_juce_issue_811.diff || true; fi
+
+      - name: 构建外部依赖 - Boehm GC
+        run: |
+          mkdir -p bin/packages
+          if [ ! -d bin/packages/gc-8.2.8 ]; then if [ -f bin/packages/gc-8.2.8.tar.gz ]; then tar -xzf bin/packages/gc-8.2.8.tar.gz -C bin/packages; else curl -fsSL https://github.com/ivmai/bdwgc/releases/download/v8.2.8/gc-8.2.8.tar.gz -o bin/packages/gc-8.2.8.tar.gz && tar -xzf bin/packages/gc-8.2.8.tar.gz -C bin/packages; fi; fi
+          cd bin/packages/gc-8.2.8
+          ./configure --enable-static --disable-shared --enable-threads=pthreads CFLAGS="-O2 -fPIC -fno-strict-aliasing"
+          make -j$(nproc)
+
+      - name: 构建外部依赖 - QScintilla (Qt6)
+        run: |
+          QMAKE_BIN=$(which qmake-qt6 2>/dev/null || which qmake 2>/dev/null)
+          QSCI_DIR=$(find bin/packages -maxdepth 1 -type d -name "QScintilla*" | head -n 1)
+          if [ -z "${QSCI_DIR}" ]; then curl -fsSL https://www.riverbankcomputing.com/static/Downloads/QScintilla/2.14.1/QScintilla_src-2.14.1.tar.gz -o bin/packages/QScintilla.tar.gz && tar -xzf bin/packages/QScintilla.tar.gz -C bin/packages && QSCI_DIR=$(find bin/packages -maxdepth 1 -type d -name "QScintilla*" | head -n 1); fi
+          cd "${QSCI_DIR}/src"
+          "${QMAKE_BIN}" qscintilla.pro CONFIG+=staticlib
+          make -j$(nproc)
+          QSCI_LIB_FOUND=$(find . -maxdepth 1 -name "libqscintilla2*.a" | head -n 1)
+          if [ -n "${QSCI_LIB_FOUND}" ]; then cp -f "${QSCI_LIB_FOUND}" libqscintilla2_qt6.a; fi
+
+      - name: 嗅探并适配 FluidSynth 与 S7 依赖结构
+        run: |
+          FLUID_LIB=$(pkg-config --variable=libdir fluidsynth 2>/dev/null || echo "/mingw64/lib")
+          mkdir -p bin/packages/fluidsynth-1.1.6/src/.libs
+          mkdir -p bin/packages/fluidsynth-1.1.6/include
+          if [ -f "${FLUID_LIB}/libfluidsynth.a" ]; then cp -f "${FLUID_LIB}/libfluidsynth.a" bin/packages/fluidsynth-1.1.6/src/.libs/libfluidsynth.a; else cp -f "${FLUID_LIB}/libfluidsynth.dll.a" bin/packages/fluidsynth-1.1.6/src/.libs/libfluidsynth.a; fi
+          FLUID_INC=$(pkg-config --variable=includedir fluidsynth 2>/dev/null || echo "/mingw64/include")
+          if [ -d "${FLUID_INC}/fluidsynth" ]; then cp -rf "${FLUID_INC}/fluidsynth" bin/packages/fluidsynth-1.1.6/include/; fi
+          touch bin/packages/deletemetorebuild
+
+      - name: 嗅探环境并执行主程序编译 (FULL_VERSION=1)
+        run: |
+          export FULL_VERSION=1
+          export BUILDTYPE=RELEASE
+          export TARGET_OS=windows
+          export RADIUM_USE_CLANG=0
+          export INCLUDE_FAUSTDEV=0
+          export INCLUDE_FAUSTDEV_BUT_NOT_LLVM=0
+          export FAUST_USES_LLVM=0
+          export INCLUDE_PDDEV=0
+          export INCLUDE_PD2DEV=0
+          export QMAKE=$(which qmake-qt6 2>/dev/null || which qmake 2>/dev/null)
+          export MOC=$(which moc-qt6 2>/dev/null || which moc 2>/dev/null)
+          export UIC=$(which uic-qt6 2>/dev/null || which uic 2>/dev/null)
+          export QSB=$(which qsb-qt6 2>/dev/null || which qsb 2>/dev/null)
+          export PKGqt="pkg-config"
+          export QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=1
+          export PYTHONEXE="$(pwd)/bin/packages/python27_install/bin/python"
+          export OBJ_X11=""
+          export OBJ_MACOSX=""
+          export RADIUM_TMP_BIN_DIR="$(pwd)/bin"
+          export RADIUM_TMP_OBJ_DIR="$(pwd)/build_objects"
+          export T="${RADIUM_TMP_OBJ_DIR}/"
+          mkdir -p "${RADIUM_TMP_OBJ_DIR}"
+          export OS_OPTS="-Werror=array-bounds -msse2 -mfpmath=sse -DFOR_WINDOWS -D__WINDOWS_MM__ -DTHREADED_OPENGL=0"
+          WIN_SYS_LIBS="-lcomdlg32 -limm32 -lole32 -loleaut32 -lrpcrt4 -lshlwapi -luuid -lversion -lwininet -lwinmm -lws2_32 -lwsock32 -lgdi32 -luser32 -lkernel32 -lcomctl32 -lsetupapi -lksuser -ldxgi -ldl"
+          export OS_LDFLAGS="${WIN_SYS_LIBS}"
+          make api/s7_types.h buildtype.opt flagopts.opt api/radium_proc.h common/keyboard_sub_ids.h --stop
+          make -j$(nproc) radium --stop
+          find bin/ -maxdepth 1 -name "*.exe" -exec strip --strip-all {} \;
+
+      - name: 收集 Windows 发布依赖库并打包
+        run: |
+          mkdir -p release_package
+          cp -rf bin/* release_package/ || true
+          rm -rf release_package/packages release_package/*.temp_log
+          windeployqt --release --no-translations release_package/radium.bin.exe || windeployqt --release --no-translations release_package/radium.exe || true
+          find /mingw64/bin -name "libgcc_s_seh-1.dll" -o -name "libstdc++-6.dll" -o -name "libwinpthread-1.dll" -o -name "libsndfile-1.dll" -o -name "libsamplerate-0.dll" -o -name "libfluidsynth-*.dll" -o -name "libglib-2.0-0.dll" -o -name "libintl-*.dll" -o -name "liblo-*.dll" | xargs -I {} cp -f {} release_package/
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: Radium-Win10-FullVersion-x64
+          path: release_package/
