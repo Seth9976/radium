@@ -104,10 +104,12 @@ setup_build_environment() {
 
 build_faust() {
 
-	rm -fr faust
-	tar xvzf faust-2.88.0.tar.gz
-	mv faust-2.88.0 faust
-	cd faust
+    rm -fr faust
+    untar_allow_symlink_fail xvzf faust-2.88.0.tar.gz
+    assert_dir faust-2.88.0
+    assert_file faust-2.88.0/Makefile        # tarball 里的顶层 Makefile 是构建入口
+    mv faust-2.88.0 faust
+    cd faust
 	
 	#patch -p0 < ../faust_polydsp_fadeout.patch
 	#patch -p0 < ../faust_soundfiles_clickfix.patch
@@ -152,7 +154,7 @@ build_faust() {
     
 	# debug build
 	#VERBOSE=1 CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" CMAKEOPT="-DCMAKE_BUILD_TYPE=Debug -DSELF_CONTAINED_LIBRARY=on -DCMAKE_CXX_COMPILER=`which $DASCXX` -DCMAKE_C_COMPILER=`which $DASCC` " make most
-    
+    assert_file build/bin/faust
 	cd ..
 }
 
@@ -185,10 +187,12 @@ build_libpds() {
 build_libpd() {
 
     rm -fr libpd
-    tar xvzf libpd-0.16.1.tar.gz
+    untar_allow_symlink_fail xvzf libpd-0.16.1.tar.gz
+    assert_dir  libpd
+    assert_file libpd/pure-data/src/m_pd.h
+    assert_file libpd/Makefile
     cd libpd/
 
-    # Apply Radium's patches.
     for patch_file in ../libpd_patches/*.patch ; do
         patch -p1 --batch --forward < "$patch_file"
     done
@@ -233,12 +237,13 @@ build_libpd() {
     fi
 
     make clean
-    make -j`nproc` libpd STATIC=true MULTI=true UTIL=true EXTRA=true ADDITIONAL_CFLAGS="$LIBPD_DEBUG_FLAGS" ADDITIONAL_LDFLAGS="$LIBPD_LINK_FLAGS"
-
-    # Note: Radium's libpds wrapper (libpds/) for pd2 (not pd1) is compiled directly into the
-    # Radium binary by Makefile.Qt, so there's nothing to build here.
+    make -j`nproc` libpd STATIC=true MULTI=true UTIL=true EXTRA=true \
+        ADDITIONAL_CFLAGS="$LIBPD_DEBUG_FLAGS" ADDITIONAL_LDFLAGS="$LIBPD_LINK_FLAGS"
 
     cd ..
+
+    assert_file libpd/pure-data/src/m_pd.h
+    assert_dir  libpd/libpd_wrapper
 }
 
 
@@ -408,9 +413,11 @@ build_pd_externals() {
             exit 1
         fi
 
-        rm -rf "`pwd`/$srcdir"
-        tar xzf "$tarball_path"
 
+        rm -rf "`pwd`/$srcdir"
+        untar_allow_symlink_fail xzf "$tarball_path"
+        assert_dir "`pwd`/$srcdir"
+		
         # Directories/files not wanted in the build can be listed in exclude.
         if [ -n "$exclude" ]; then
             for exclude_path in $exclude ; do
@@ -431,7 +438,7 @@ build_pd_externals() {
             sub_tmpdir="`pwd`/.pd2-submodule-$$"
             rm -rf "$sub_tmpdir"
             mkdir -p "$sub_tmpdir"
-            tar xzf "$sub_tarball_path" -C "$sub_tmpdir"
+            untar_allow_symlink_fail xzf "$sub_tarball_path" -C "$sub_tmpdir"
             sub_source="`find "$sub_tmpdir" -mindepth 1 -maxdepth 1 -type d | head -n 1`"
             if [ -z "$sub_source" ]; then
                 echo "Could not find the top-level directory in $submodule_tarball" >&2
@@ -555,18 +562,12 @@ build_pd_externals() {
 build_qhttpserver() {
 
     rm -fr qhttpserver-master
-    tar xvzf qhttpserver-master.tar.gz
+    untar_allow_symlink_fail xvzf qhttpserver-master.tar.gz
+    assert_dir qhttpserver-master
+    assert_file qhttpserver-master/src/src.pro
+
     cd qhttpserver-master/
 
-    # 说明：
-    #   - Windows/MinGW 下 Qt 的 qmake 默认 debug_and_release 处于开启状态，
-    #     Debug 静态库会被命名为 libqhttpserverd.a，而 Radium 只链接
-    #     libqhttpserver.a；examples/ 又会去链 -lqhttpserverd，导致
-    #     “cannot find -lqhttpserverd”。
-    #   - 这里强制 Release 命名，并只构建 src/，不进入 examples/，
-    #     从根上避开 debug/release 的命名差异。
-    #   - moc 产物仍然输出到 ../build/，正是 Makefile.Qt 里
-    #     $(QHTTPSERVER_PATH)/build/moc_*.cpp 的期望位置。
     {
         echo "CONFIG += staticlib"
         echo "CONFIG -= debug_and_release"
@@ -581,6 +582,10 @@ build_qhttpserver() {
     make -j`nproc`
     cd ../..
 
+    # 回到 bin/packages/ 后验证关键产物
+    assert_file qhttpserver-master/build/moc_qhttpconnection.cpp
+    assert_file qhttpserver-master/build/moc_qhttpserver.cpp
+    assert_file qhttpserver-master/lib/libqhttpserver.a
 }
 
 
@@ -596,36 +601,61 @@ build_gc() {
     GC_VERSION=8.2.8
     LIBATOMIC_VERSION=7.8.0
     rm -fr gc-$GC_VERSION libatomic_ops-$LIBATOMIC_VERSION
-    tar xvzf gc-$GC_VERSION.tar.gz
-    #mv bdwgc-$GC_VERSION gc-$GC_VERSION
-    tar xvzf libatomic_ops-$LIBATOMIC_VERSION.tar.gz
+    untar_allow_symlink_fail xvzf gc-$GC_VERSION.tar.gz
+    untar_allow_symlink_fail xvzf libatomic_ops-$LIBATOMIC_VERSION.tar.gz
+    assert_file gc-$GC_VERSION/configure
+    assert_dir  libatomic_ops-$LIBATOMIC_VERSION/src
     cd gc-$GC_VERSION
-    ln -s ../libatomic_ops-$LIBATOMIC_VERSION libatomic_ops
-    #echo 'void RADIUM_ensure_bin_packages_gc_is_used(void){ABORT("GC not configured properly");}' >>malloc.c
+
+    # Windows 上 ln -s 在无权限时可能失败；显式回退为 cp -r
+    if ! ln -s ../libatomic_ops-$LIBATOMIC_VERSION libatomic_ops 2>/dev/null; then
+        echo "warn: ln -s failed for gc/libatomic_ops; falling back to cp -r" >&2
+        cp -r ../libatomic_ops-$LIBATOMIC_VERSION libatomic_ops
+    fi
+    assert_dir libatomic_ops/src
+
     echo 'void RADIUM_ensure_bin_packages_gc_is_used(void){}' >>malloc.c
     echo '#if defined(GC_ASSERTIONS) || !defined(NO_DEBUGGING)' >>malloc.c
     echo "#error "nope"" >>malloc.c
     echo "#endif" >>malloc.c
-    #patch -p1 <../gcdiff.patch
-    #./autogen.sh
+
     CFLAGS="-mtune=generic -g -O2" ./configure --enable-static --disable-shared --disable-gc-debug --disable-gc-assertions
     CFLAGS="-mtune=generic -g -O2" make -j`nproc`
     cd ..
+
+    assert_file gc-$GC_VERSION/.libs/libgc.a
+    assert_dir  gc-$GC_VERSION/include
 }
 
 build_fluidsynth() {
 
     rm -fr fluidsynth-1.1.6
-    tar xvzf fluidsynth-1.1.6.tar.gz
+    untar_allow_symlink_fail xvzf fluidsynth-1.1.6.tar.gz
+    assert_file fluidsynth-1.1.6/configure
+    # 注意：m4/lt*.m4 是 autogen 用的 libtool macro，configure 已生成，缺失不影响构建。
+
     cd fluidsynth-1.1.6
     make clean
-    # Note: Old autoconf preprocessor sanity checks fail when CFLAGS/CPPFLAGS contain
-    # multiple -arch flags ("cannot use 'cpp-output' output with multiple -arch options"),
-    # so configure is run without arch flags, and arch flags are passed to make instead.
-    CFLAGS="-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\"" CPPFLAGS="-fPIC -fno-strict-aliasing -O3" CXXFLAGS="-fPIC -fno-strict-aliasing -O3" LDFLAGS="" CC=$DASCC CXX=$DASCXX ./configure --enable-static --disable-aufile-support --disable-pulse-support --disable-alsa-support --disable-libsndfile-support --disable-portaudio-support --disable-oss-support --disable-midishare --disable-jack-support --disable-coreaudio --disable-coremidi --disable-dart --disable-lash --disable-ladcca --disable-aufile-support --disable-dbus-support --without-readline
-    # --enable-debug
-    make -j`nproc` CFLAGS="-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\" $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" CPPFLAGS="-fPIC -fno-strict-aliasing -O3 $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" CXXFLAGS="-fPIC -fno-strict-aliasing -O3 $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" LDFLAGS="$DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
+
+    CFLAGS="-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\"" \
+    CPPFLAGS="-fPIC -fno-strict-aliasing -O3" \
+    CXXFLAGS="-fPIC -fno-strict-aliasing -O3" \
+    LDFLAGS="" \
+    CC=$DASCC CXX=$DASCXX \
+    ./configure --enable-static --disable-aufile-support --disable-pulse-support \
+        --disable-alsa-support --disable-libsndfile-support --disable-portaudio-support \
+        --disable-oss-support --disable-midishare --disable-jack-support \
+        --disable-coreaudio --disable-coremidi --disable-dart --disable-lash \
+        --disable-ladcca --disable-aufile-support --disable-dbus-support --without-readline
+
+    make -j`nproc` \
+        CFLAGS="-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\" $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" \
+        CPPFLAGS="-fPIC -fno-strict-aliasing -O3 $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" \
+        CXXFLAGS="-fPIC -fno-strict-aliasing -O3 $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" \
+        LDFLAGS="$DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
     cd ..
+
+    assert_file fluidsynth-1.1.6/src/.libs/libfluidsynth.a
 }
 
 build_libgig ()
@@ -645,21 +675,23 @@ build_libgig ()
 
 
 build_qscintilla() {
-    # QScintilla
     rm -fr QScintilla_gpl-2.10.8 QScintilla_src-2.14.0
-    tar xvzf QScintilla_src-2.14.0.tar.gz 
+    untar_allow_symlink_fail xvzf QScintilla_src-2.14.0.tar.gz
+    assert_file QScintilla_src-2.14.0/src/qscintilla.pro
+
     cd QScintilla_src-2.14.0/src
     echo "CONFIG += staticlib" >> qscintilla.pro
     if uname -s |grep Darwin ; then
-		$QMAKE QMAKE_CFLAGS+="$DARWIN_ARCH_FLAGS" QMAKE_CXXFLAGS+="$DARWIN_ARCH_FLAGS" QMAKE_LFLAGS+="$DARWIN_ARCH_FLAGS"
-		# install_name_tool can't handle fat archive members. Not needed for a static lib anyway.
-		sed -i '' '/install_name_tool -id/d' Makefile
+        $QMAKE QMAKE_CFLAGS+="$DARWIN_ARCH_FLAGS" QMAKE_CXXFLAGS+="$DARWIN_ARCH_FLAGS" QMAKE_LFLAGS+="$DARWIN_ARCH_FLAGS"
+        sed -i '' '/install_name_tool -id/d' Makefile
     else
-		$QMAKE
+        $QMAKE
     fi
     patch -p0 <../../qscintilla.patch
     make -j`nproc`
     cd ../..
+
+    assert_file QScintilla_src-2.14.0/src/libqscintilla2_qt6.a
 }
 
 
