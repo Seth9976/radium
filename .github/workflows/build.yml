@@ -109,6 +109,7 @@ jobs:
       # 不挑选/不排序/不改写任何 build_*,开关判断全部交给 build.sh 自身。
       # 所有 Radium 脚本均以"顶层程序"方式执行,绝不 source(否则 ${0} 指向 runner 临时脚本)。
       - name: 构建捆绑依赖 (make packages)
+      - name: 构建捆绑依赖 (make packages)
         run: |
           set -eo pipefail
           export INCLUDE_FAUSTDEV=0
@@ -126,13 +127,10 @@ jobs:
           ls bin/packages
           rm -f bin/packages/deletemetorebuild
 
-          # 兜底 LF（上一步 dos2unix 是被 || true 包着的，可能没成功）
           dos2unix bin/packages/build.sh
 
-          # 单行 sed：绝不使用 \ 续行，避免尾随空格把命令截断
           sed -i -E 's/^([[:space:]]*)build_faust([[:space:]]*)$/\1#build_faust/; s/^([[:space:]]*)build_libpd([[:space:]]*)$/\1#build_libpd/; s/^([[:space:]]*)build_pd_externals([[:space:]]*)$/\1#build_pd_externals/' bin/packages/build.sh
 
-          # 显式校验：三条都注释掉才算成功，否则立刻失败并打印现场
           for fn in build_faust build_libpd build_pd_externals; do
             if ! grep -qE "^[[:space:]]*#${fn}[[:space:]]*$" bin/packages/build.sh; then
               echo "::error::sed 未注释 ${fn}；make packages 会尝试编译它，但 bin/packages/ 缺少对应源码 tarball。"
@@ -140,34 +138,26 @@ jobs:
               exit 1
             fi
           done
-          echo "==== sed 验证通过，build.sh 中相关行： ===="
+          echo "==== sed 验证通过，相关行： ===="
           grep -nE 'build_faust|build_libpd|build_pd_externals' bin/packages/build.sh || true
 
           make packages
-          PYBIN=bin/packages/python27_install/bin
-          export PATH="$PYBIN:$(pwd)/bin/packages/python27_install/lib:$PATH"
-          ls -la "$PYBIN"
-          if [ ! -f "$PYBIN/python" ]; then
-            if [ -f "$PYBIN/python.exe" ]; then
-              echo '#!/bin/sh' > "$PYBIN/python"
-              echo 'exec "$(dirname "$0")/python.exe" "$@"' >> "$PYBIN/python"
-              chmod +x "$PYBIN/python"
-            elif [ -f "$PYBIN/python2.7.exe" ]; then
-              echo '#!/bin/sh' > "$PYBIN/python"
-              echo 'exec "$(dirname "$0")/python2.7.exe" "$@"' >> "$PYBIN/python"
-              chmod +x "$PYBIN/python"
-            elif [ -f "$PYBIN/python2.7" ]; then
-              cp -f "$PYBIN/python2.7" "$PYBIN/python"
-            fi
+
+      - name: 校验 packages 产物
+        run: |
+          set -eo pipefail
+          QH="bin/packages/qhttpserver-master"
+          test -f "$QH/build/moc_qhttpconnection.cpp" || { echo "::error::moc_qhttpconnection.cpp 未生成"; exit 1; }
+          test -f "$QH/build/moc_qhttpserver.cpp"     || { echo "::error::moc_qhttpserver.cpp 未生成"; exit 1; }
+          test -f "$QH/lib/libqhttpserver.a"          || { echo "::error::libqhttpserver.a 未生成"; exit 1; }
+          if [ -f "$QH/lib/libqhttpserverd.a" ]; then
+            echo "::warning::出现了 libqhttpserverd.a，debug_and_release 可能没关掉"
           fi
-          PYTHONEXE="$(./find_python_path.sh)"
-          echo "PYTHONEXE=$PYTHONEXE"
-          "$PYTHONEXE" -V
-          echo "$(cygpath -m "$PYBIN")" >> "$GITHUB_PATH"
-          echo "$(cygpath -m "$(pwd)/bin/packages/python27_install/lib")" >> "$GITHUB_PATH"
           ls -la bin/packages/gc-8.2.8/.libs/libgc.a
           ls -la bin/packages/fluidsynth-1.1.6/src/.libs/libfluidsynth.a
           ls -la bin/packages/QScintilla_src-2.14.0/src/libqscintilla2_qt6.a
+          ls -la "$QH/lib/libqhttpserver.a"
+          echo "packages 产物校验通过"
 
       - name: 编译 Radium (FULL_VERSION=1)
         run: |
