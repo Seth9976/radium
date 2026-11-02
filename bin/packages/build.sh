@@ -1,6 +1,33 @@
 #!/usr/bin/env bash
 
 set -eEu
+# 兜底 helper：若 helpers.sh 未被 source 到（例如 configuration.sh 变了路径），
+# 也能保证 build_* 里用到的函数一定存在。行为与 helpers.sh 中同名函数等价。
+if ! declare -F untar_allow_symlink_fail >/dev/null 2>&1 ; then
+    untar_allow_symlink_fail() {
+        local flag="$1"
+        local tarball="$2"
+        shift 2
+        tar "$flag" "$tarball" "$@" || true
+        return 0
+    }
+fi
+if ! declare -F assert_file_exists >/dev/null 2>&1 ; then
+    assert_file_exists() {
+        if [ ! -f "$1" ] ; then
+            echo "error: expected file '$1' to exist" >&2
+            exit 1
+        fi
+    }
+fi
+if ! declare -F assert_dir >/dev/null 2>&1 ; then
+    assert_dir() {
+        if [ ! -d "$1" ] ; then
+            echo "error: expected directory '$1' to exist" >&2
+            exit 1
+        fi
+    }
+fi
 #set -x
 
 setup_build_environment() {
@@ -107,55 +134,42 @@ build_faust() {
     rm -fr faust
     untar_allow_symlink_fail xvzf faust-2.88.0.tar.gz
     assert_dir faust-2.88.0
-    assert_file faust-2.88.0/Makefile        # tarball 里的顶层 Makefile 是构建入口
+    assert_file_exists faust-2.88.0/Makefile
     mv faust-2.88.0 faust
     cd faust
-	
-	#patch -p0 < ../faust_polydsp_fadeout.patch
-	#patch -p0 < ../faust_soundfiles_clickfix.patch
-	patch -p0 < ../faust_soundfile_padding.patch
-	patch -p0 < ../faust_fopenat_nochdir.patch
-	patch -p0 < ../faust_fix_hang.patch
-	patch -p0 < ../faust_fix_eval_recursion.patch
-	patch -p0 < ../faust_fix_apply_memo.patch
-	patch -p0 < ../faust_fix_svg_folding.patch
-	patch -p0 < ../faust_fix_fft_route.patch
-	
-	### this line is needed to build on artix
-	#export LIBNCURSES_PATH=$(shell find /usr -name libncursesw_g.a)
-    
-	cp ../faust_targets.cmake build/targets/most.cmake
-    
-	if is_0 $FAUST_USES_LLVM ; then
-		cp ../faust_radium_nonllvm.cmake build/backends/most.cmake
-	else
-		cp ../faust_radium_llvm.cmake build/backends/most.cmake
-		export ORGTEMPPATH=$PATH
-		export PATH=$($LLVM_CONFIG_BIN --bindir):$PATH
-		#echo "PATH: $PATH"
-	fi
-	
-	# Use all CPUs when building faust.
-	JOBS=$(nproc)
-	
-	#sed -i.backup "s/(BUILDLOCATION)$/(BUILDLOCATION) -j${JOBS}/" Makefile
-	#exit -1
 
-	echo "\n\nNote: Faust might fail if built with gcc. To work around that, simply build faust with clang instead, temporarily setting RADIUM_USE_CLANG=1 only when building faust.\n\n"
-	
-	# release build
-	BUILDOPT="--config Release -j${JOBS}" VERBOSE=1 CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" CMAKEOPT="-DCMAKE_BUILD_TYPE=Release -DSELF_CONTAINED_LIBRARY=on -DCMAKE_CXX_COMPILER=`which $DASCXX` -DCMAKE_C_COMPILER=`which $DASCC` $DARWIN_CMAKEOPT" make most
-	
-	if ! is_0 $FAUST_USES_LLVM ; then
-		export PATH=$ORGTEMPPATH
-		unset ORGTEMPPATH
-	fi
-    
-    
-	# debug build
-	#VERBOSE=1 CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" CMAKEOPT="-DCMAKE_BUILD_TYPE=Debug -DSELF_CONTAINED_LIBRARY=on -DCMAKE_CXX_COMPILER=`which $DASCXX` -DCMAKE_C_COMPILER=`which $DASCC` " make most
-    assert_file build/bin/faust
-	cd ..
+    patch -p0 < ../faust_soundfile_padding.patch
+    patch -p0 < ../faust_fopenat_nochdir.patch
+    patch -p0 < ../faust_fix_hang.patch
+    patch -p0 < ../faust_fix_eval_recursion.patch
+    patch -p0 < ../faust_fix_apply_memo.patch
+    patch -p0 < ../faust_fix_svg_folding.patch
+    patch -p0 < ../faust_fix_fft_route.patch
+
+    cp ../faust_targets.cmake build/targets/most.cmake
+
+    if is_0 $FAUST_USES_LLVM ; then
+        cp ../faust_radium_nonllvm.cmake build/backends/most.cmake
+    else
+        cp ../faust_radium_llvm.cmake build/backends/most.cmake
+        export ORGTEMPPATH=$PATH
+        export PATH=$($LLVM_CONFIG_BIN --bindir):$PATH
+    fi
+
+    local JOBS=$(nproc)
+    local CC_PATH=$(which $DASCC)
+    local CXX_PATH=$(which $DASCXX)
+    local CMAKEOPTS="-DCMAKE_BUILD_TYPE=Release -DSELF_CONTAINED_LIBRARY=on -DCMAKE_CXX_COMPILER=$CXX_PATH -DCMAKE_C_COMPILER=$CC_PATH $DARWIN_CMAKEOPT"
+
+    BUILDOPT="--config Release -j${JOBS}" VERBOSE=1 CFLAGS="$CFLAGS" CXXFLAGS="$CXXFLAGS" CMAKEOPT="$CMAKEOPTS" make most
+
+    if ! is_0 $FAUST_USES_LLVM ; then
+        export PATH=$ORGTEMPPATH
+        unset ORGTEMPPATH
+    fi
+
+    cd ..
+    assert_file_exists faust/build/bin/faust
 }
 
 build_libpds() {
@@ -188,35 +202,22 @@ build_libpd() {
 
     rm -fr libpd
     untar_allow_symlink_fail xvzf libpd-0.16.1.tar.gz
-    assert_dir  libpd
-    assert_file libpd/pure-data/src/m_pd.h
-    assert_file libpd/Makefile
+    assert_dir libpd
+    assert_file_exists libpd/Makefile
+    assert_file_exists libpd/pure-data/src/m_pd.h
     cd libpd/
 
     for patch_file in ../libpd_patches/*.patch ; do
         patch -p1 --batch --forward < "$patch_file"
     done
 
-    # Always build with debug symbols and frame pointers. The Makefile's
-    # OPT_CFLAGS contains -fomit-frame-pointer, but ADDITIONAL_CFLAGS is
-    # appended last, so -fno-omit-frame-pointer overrides it.
-    LIBPD_DEBUG_FLAGS="-g -fno-omit-frame-pointer ${LIBPD_EXTRA_CFLAGS:-}"
-
-    LIBPD_LINK_FLAGS=""
+    local LIBPD_DEBUG_FLAGS="-g -fno-omit-frame-pointer ${LIBPD_EXTRA_CFLAGS:-}"
+    local LIBPD_LINK_FLAGS=""
 
     if uname -s |grep Darwin ; then
-        # Build universal, same as the other Mac packages. (Debug builds of
-        # Radium are arm64 only, while release builds are arm64+x86_64.)
         LIBPD_DEBUG_FLAGS="$LIBPD_DEBUG_FLAGS $DARWIN_ARCH_FLAGS $DARWIN_MIN_FLAGS"
         LIBPD_LINK_FLAGS="$DARWIN_ARCH_FLAGS $DARWIN_MIN_FLAGS"
-
-        # The dylib is placed in the bundled packages directory, both for dev
-        # builds (via the /tmp/radium_bin/packages symlink) and for Radium.app.
         LIBPD_LINK_FLAGS="$LIBPD_LINK_FLAGS -Wl,-install_name,@executable_path/packages/libpd/libs/libpd.dylib"
-
-        # The Mac GUI needs Tcl/Tk 8.6. The system /usr/bin/wish is Tk 8.5,
-        # which is killed by newer versions of MacOS, so let sys_startgui()
-        # try one of these first. WISH must expand to a C string literal.
         for wish in /opt/local/libexec/tk-quartz/wish8.6 /opt/local/bin/wish8.6 /opt/homebrew/bin/wish8.6 ; do
             if [ -x "$wish" ] ; then
                 LIBPD_DEBUG_FLAGS="$LIBPD_DEBUG_FLAGS -DWISH='\"$wish\"'"
@@ -224,26 +225,19 @@ build_libpd() {
             fi
         done
     else
-        LIBPD_TARGET=$(${CC:-cc} -dumpmachine 2>/dev/null || true)
+        local LIBPD_TARGET=$(${CC:-cc} -dumpmachine 2>/dev/null || true)
         case "$LIBPD_TARGET" in
-            *mingw*|*cygwin*|*msys*)
-                # The link flags for the target are set by the Makefile.
-                LIBPD_LINK_FLAGS=""
-                ;;
-            *)
-                LIBPD_LINK_FLAGS="-Wl,-soname,libpd.so"
-                ;;
+            *mingw*|*cygwin*|*msys*) LIBPD_LINK_FLAGS="" ;;
+            *) LIBPD_LINK_FLAGS="-Wl,-soname,libpd.so" ;;
         esac
     fi
 
     make clean
-    make -j`nproc` libpd STATIC=true MULTI=true UTIL=true EXTRA=true \
-        ADDITIONAL_CFLAGS="$LIBPD_DEBUG_FLAGS" ADDITIONAL_LDFLAGS="$LIBPD_LINK_FLAGS"
+    make -j`nproc` libpd STATIC=true MULTI=true UTIL=true EXTRA=true ADDITIONAL_CFLAGS="$LIBPD_DEBUG_FLAGS" ADDITIONAL_LDFLAGS="$LIBPD_LINK_FLAGS"
 
     cd ..
-
-    assert_file libpd/pure-data/src/m_pd.h
-    assert_dir  libpd/libpd_wrapper
+    assert_dir libpd/libpd_wrapper
+    assert_file_exists libpd/pure-data/src/m_pd.h
 }
 
 
@@ -440,7 +434,7 @@ build_pd_externals() {
             mkdir -p "$sub_tmpdir"
             untar_allow_symlink_fail xzf "$sub_tarball_path" -C "$sub_tmpdir"
             sub_source="`find "$sub_tmpdir" -mindepth 1 -maxdepth 1 -type d | head -n 1`"
-            if [ -z "$sub_source" ]; then
+            if [ -z "$sub_source" ] ; then
                 echo "Could not find the top-level directory in $submodule_tarball" >&2
                 rm -rf "$sub_tmpdir"
                 exit 1
@@ -564,28 +558,25 @@ build_qhttpserver() {
     rm -fr qhttpserver-master
     untar_allow_symlink_fail xvzf qhttpserver-master.tar.gz
     assert_dir qhttpserver-master
-    assert_file qhttpserver-master/src/src.pro
+    assert_file_exists qhttpserver-master/src/src.pro
 
-    cd qhttpserver-master/
+    cd qhttpserver-master
 
-    {
-        echo "CONFIG += staticlib"
-        echo "CONFIG -= debug_and_release"
-        echo "CONFIG -= debug"
-        echo "CONFIG += release"
-    } >> src/src.pro
+    echo "CONFIG += staticlib" >> src/src.pro
+    echo "CONFIG -= debug_and_release" >> src/src.pro
+    echo "CONFIG -= debug" >> src/src.pro
+    echo "CONFIG += release" >> src/src.pro
 
-    patch -p1 <../qhttpserver_qt6.patch
+    patch -p1 < ../qhttpserver_qt6.patch
 
     cd src
     $QMAKE
     make -j`nproc`
     cd ../..
 
-    # 回到 bin/packages/ 后验证关键产物
-    assert_file qhttpserver-master/build/moc_qhttpconnection.cpp
-    assert_file qhttpserver-master/build/moc_qhttpserver.cpp
-    assert_file qhttpserver-master/lib/libqhttpserver.a
+    assert_file_exists qhttpserver-master/build/moc_qhttpconnection.cpp
+    assert_file_exists qhttpserver-master/build/moc_qhttpserver.cpp
+    assert_file_exists qhttpserver-master/lib/libqhttpserver.a
 }
 
 
@@ -603,13 +594,12 @@ build_gc() {
     rm -fr gc-$GC_VERSION libatomic_ops-$LIBATOMIC_VERSION
     untar_allow_symlink_fail xvzf gc-$GC_VERSION.tar.gz
     untar_allow_symlink_fail xvzf libatomic_ops-$LIBATOMIC_VERSION.tar.gz
-    assert_file gc-$GC_VERSION/configure
-    assert_dir  libatomic_ops-$LIBATOMIC_VERSION/src
+    assert_file_exists gc-$GC_VERSION/configure
+    assert_dir libatomic_ops-$LIBATOMIC_VERSION/src
     cd gc-$GC_VERSION
 
-    # Windows 上 ln -s 在无权限时可能失败；显式回退为 cp -r
-    if ! ln -s ../libatomic_ops-$LIBATOMIC_VERSION libatomic_ops 2>/dev/null; then
-        echo "warn: ln -s failed for gc/libatomic_ops; falling back to cp -r" >&2
+    if ! ln -s ../libatomic_ops-$LIBATOMIC_VERSION libatomic_ops 2>/dev/null ; then
+        echo "warn: ln -s failed, falling back to cp -r" >&2
         cp -r ../libatomic_ops-$LIBATOMIC_VERSION libatomic_ops
     fi
     assert_dir libatomic_ops/src
@@ -623,39 +613,36 @@ build_gc() {
     CFLAGS="-mtune=generic -g -O2" make -j`nproc`
     cd ..
 
-    assert_file gc-$GC_VERSION/.libs/libgc.a
-    assert_dir  gc-$GC_VERSION/include
+    assert_file_exists gc-$GC_VERSION/.libs/libgc.a
+    assert_dir gc-$GC_VERSION/include
 }
 
 build_fluidsynth() {
 
     rm -fr fluidsynth-1.1.6
     untar_allow_symlink_fail xvzf fluidsynth-1.1.6.tar.gz
-    assert_file fluidsynth-1.1.6/configure
-    # 注意：m4/lt*.m4 是 autogen 用的 libtool macro，configure 已生成，缺失不影响构建。
+    assert_file_exists fluidsynth-1.1.6/configure
 
     cd fluidsynth-1.1.6
     make clean
 
-    CFLAGS="-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\"" \
-    CPPFLAGS="-fPIC -fno-strict-aliasing -O3" \
-    CXXFLAGS="-fPIC -fno-strict-aliasing -O3" \
-    LDFLAGS="" \
-    CC=$DASCC CXX=$DASCXX \
-    ./configure --enable-static --disable-aufile-support --disable-pulse-support \
-        --disable-alsa-support --disable-libsndfile-support --disable-portaudio-support \
-        --disable-oss-support --disable-midishare --disable-jack-support \
-        --disable-coreaudio --disable-coremidi --disable-dart --disable-lash \
-        --disable-ladcca --disable-aufile-support --disable-dbus-support --without-readline
+    local FS_CFLAGS='-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\"'
+    local FS_CPPFLAGS='-fPIC -fno-strict-aliasing -O3'
+    local FS_CXXFLAGS='-fPIC -fno-strict-aliasing -O3'
+    local FS_LDFLAGS=''
+    local FS_CONFIGURE_OPTS='--enable-static --disable-aufile-support --disable-pulse-support --disable-alsa-support --disable-libsndfile-support --disable-portaudio-support --disable-oss-support --disable-midishare --disable-jack-support --disable-coreaudio --disable-coremidi --disable-dart --disable-lash --disable-ladcca --disable-dbus-support --without-readline'
 
-    make -j`nproc` \
-        CFLAGS="-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\" $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" \
-        CPPFLAGS="-fPIC -fno-strict-aliasing -O3 $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" \
-        CXXFLAGS="-fPIC -fno-strict-aliasing -O3 $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS" \
-        LDFLAGS="$DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
+    CFLAGS="$FS_CFLAGS" CPPFLAGS="$FS_CPPFLAGS" CXXFLAGS="$FS_CXXFLAGS" LDFLAGS="$FS_LDFLAGS" CC=$DASCC CXX=$DASCXX ./configure $FS_CONFIGURE_OPTS
+
+    local FS_M_CFLAGS="$FS_CFLAGS $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
+    local FS_M_CPPFLAGS="$FS_CPPFLAGS $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
+    local FS_M_CXXFLAGS="$FS_CXXFLAGS $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
+    local FS_M_LDFLAGS="$DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
+
+    make -j`nproc` CFLAGS="$FS_M_CFLAGS" CPPFLAGS="$FS_M_CPPFLAGS" CXXFLAGS="$FS_M_CXXFLAGS" LDFLAGS="$FS_M_LDFLAGS"
     cd ..
 
-    assert_file fluidsynth-1.1.6/src/.libs/libfluidsynth.a
+    assert_file_exists fluidsynth-1.1.6/src/.libs/libfluidsynth.a
 }
 
 build_libgig ()
@@ -677,7 +664,7 @@ build_libgig ()
 build_qscintilla() {
     rm -fr QScintilla_gpl-2.10.8 QScintilla_src-2.14.0
     untar_allow_symlink_fail xvzf QScintilla_src-2.14.0.tar.gz
-    assert_file QScintilla_src-2.14.0/src/qscintilla.pro
+    assert_file_exists QScintilla_src-2.14.0/src/qscintilla.pro
 
     cd QScintilla_src-2.14.0/src
     echo "CONFIG += staticlib" >> qscintilla.pro
@@ -691,7 +678,7 @@ build_qscintilla() {
     make -j`nproc`
     cd ../..
 
-    assert_file QScintilla_src-2.14.0/src/libqscintilla2_qt6.a
+    assert_file_exists QScintilla_src-2.14.0/src/libqscintilla2_qt6.a
 }
 
 
