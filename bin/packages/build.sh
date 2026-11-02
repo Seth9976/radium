@@ -557,11 +557,30 @@ build_qhttpserver() {
     rm -fr qhttpserver-master
     tar xvzf qhttpserver-master.tar.gz
     cd qhttpserver-master/
-    echo "CONFIG += staticlib" >> src/src.pro
-	patch -p1 <../qhttpserver_qt6.patch
+
+    # 说明：
+    #   - Windows/MinGW 下 Qt 的 qmake 默认 debug_and_release 处于开启状态，
+    #     Debug 静态库会被命名为 libqhttpserverd.a，而 Radium 只链接
+    #     libqhttpserver.a；examples/ 又会去链 -lqhttpserverd，导致
+    #     “cannot find -lqhttpserverd”。
+    #   - 这里强制 Release 命名，并只构建 src/，不进入 examples/，
+    #     从根上避开 debug/release 的命名差异。
+    #   - moc 产物仍然输出到 ../build/，正是 Makefile.Qt 里
+    #     $(QHTTPSERVER_PATH)/build/moc_*.cpp 的期望位置。
+    {
+        echo "CONFIG += staticlib"
+        echo "CONFIG -= debug_and_release"
+        echo "CONFIG -= debug"
+        echo "CONFIG += release"
+    } >> src/src.pro
+
+    patch -p1 <../qhttpserver_qt6.patch
+
+    cd src
     $QMAKE
-    make -j`nproc` # necessary to create the moc files.
-    cd ..
+    make -j`nproc`
+    cd ../..
+
 }
 
 
