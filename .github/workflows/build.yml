@@ -122,6 +122,11 @@ jobs:
           for t in Python-2.7.18.tgz python27_disable_linux.patch gc-8.2.8.tar.gz libatomic_ops-7.8.0.tar.gz fluidsynth-1.1.6.tar.gz QScintilla_src-2.14.0.tar.gz qhttpserver-master.tar.gz; do if [ ! -f "bin/packages/$t" ]; then echo "::error::缺少 bin/packages/$t"; exit 1; fi; done
           ls bin/packages
           rm -f bin/packages/deletemetorebuild
+          sed -i -E \  
+            -e 's/^([[:space:]]*)build_faust([[:space:]]*)$/\1#build_faust/' \  
+            -e 's/^([[:space:]]*)build_libpd([[:space:]]*)$/\1#build_libpd/' \  
+            -e 's/^([[:space:]]*)build_pd_externals([[:space:]]*)$/\1#build_pd_externals/' \  
+            bin/packages/build.sh
           make packages
           PYBIN=bin/packages/python27_install/bin
           export PATH="$PYBIN:$(pwd)/bin/packages/python27_install/lib:$PATH"
