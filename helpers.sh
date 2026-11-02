@@ -92,6 +92,24 @@ set_radium_build_dirs()
     set_var T "$RADIUM_TMP_OBJ_DIR/"
 }
 
+assert_dir()
+{
+    if [ ! -d "$1" ] ; then
+        handle_failure "\"${1}\" doesn't seem to be a directory."
+    fi
+}
+
+# 解压 tarball，容忍 Windows 上创建符号链接失败导致的非零退出码。
+# 调用方必须紧跟 assert_file_exists / assert_dir 验证真正需要的文件存在，
+# 不能把它当成“解压一定成功”的保证。
+untar_allow_symlink_fail()
+{
+    local flag="$1"
+    local tarball="$2"
+    shift 2
+    tar "$flag" "$tarball" "$@" || true
+    return 0
+}
 #export GAKK
 #set_var GAKK 4
 #echo "GAKK: -${GAKK}-"
