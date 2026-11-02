@@ -2,31 +2,30 @@
 
 set -eEu
 
-# build.sh 里已经定义过这三个 helper；若单独运行本文件则兜底一份。
-if ! declare -F untar_allow_symlink_fail >/dev/null 2>&1; then
+if ! declare -F untar_allow_symlink_fail >/dev/null 2>&1 ; then
     untar_allow_symlink_fail() {
-        local flag="$1" tarball="$2"; shift 2
-        local rc=0
-        tar "$flag" "$tarball" "$@" || rc=$?
-        [ "$rc" -ne 0 ] && echo "warn: tar '$tarball' exited with $rc (symlink permission?)" >&2
+        local flag="$1"
+        local tarball="$2"
+        shift 2
+        tar "$flag" "$tarball" "$@" || true
         return 0
     }
 fi
-if ! declare -F assert_file >/dev/null 2>&1; then
-    assert_file() { [ -e "$1" ] || { echo "error: missing '$1'" >&2; exit 1; }; }
+if ! declare -F assert_file_exists >/dev/null 2>&1 ; then
+    assert_file_exists() {
+        if [ ! -f "$1" ] ; then
+            echo "error: expected file '$1' to exist" >&2
+            exit 1
+        fi
+    }
 fi
-
-is_defined()
-{
-    [ -v $1 ]
-}
-
-if ! is_defined MY_CC ; then
-	MY_CC=clang
-fi
-
-if ! is_defined MY_CPP ; then
-	MY_CPP=clang++
+if ! declare -F assert_dir >/dev/null 2>&1 ; then
+    assert_dir() {
+        if [ ! -d "$1" ] ; then
+            echo "error: expected directory '$1' to exist" >&2
+            exit 1
+        fi
+    }
 fi
 
 echo "CC: $MY_CC"
@@ -82,33 +81,24 @@ END
     CFLAGS=-Wno-implicit-function-declaration
     CPPCFLAGS=-Wno-implicit-function-declaration
 
-    ARCH_FLAGS=""
+    local ARCH_FLAGS=""
     if uname |grep Darwin > /dev/null ; then
         ARCH_FLAGS="-arch arm64 -arch x86_64 -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET:-14.0}"
     fi
 
-    ./configure CC=$MY_CC CXX=$MY_CPP \
-        CFLAGS="-Wno-implicit-function-declaration $ARCH_FLAGS" \
-        CPPCFLAGS="-Wno-implicit-function-declaration $ARCH_FLAGS" \
-        LDFLAGS="$ARCH_FLAGS" \
-        --prefix=$(realpath `pwd`/../python27_install) \
-        --without-gcc --without-threads --disable-ipv6 --without-system-ffi \
-        --disable-toolbox-glue --disable-framework --enable-shared
+    local PY_CFLAGS="-Wno-implicit-function-declaration $ARCH_FLAGS"
 
-    CC=$MY_CC CXX=$MY_CPP \
-        CFLAGS="-Wno-implicit-function-declaration $ARCH_FLAGS" \
-        CPPCFLAGS="-Wno-implicit-function-declaration $ARCH_FLAGS" \
-        LDFLAGS="$ARCH_FLAGS" \
-        make -j`nproc`
+    ./configure CC=$MY_CC CXX=$MY_CPP CFLAGS="$PY_CFLAGS" CPPCFLAGS="$PY_CFLAGS" LDFLAGS="$ARCH_FLAGS" --prefix=$(realpath `pwd`/../python27_install) --without-gcc --without-threads --disable-ipv6 --without-system-ffi --disable-toolbox-glue --disable-framework --enable-shared
+
+    CC=$MY_CC CXX=$MY_CPP CFLAGS="$PY_CFLAGS" CPPCFLAGS="$PY_CFLAGS" LDFLAGS="$ARCH_FLAGS" make -j`nproc`
 
     make install
     export LD_LIBRARY_PATH="$(realpath `pwd`/../python27_install/lib)"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     cd ..
 
-    # Windows 上 install 出来是 python.exe；Unix 是 python
-    if [ -f python27_install/bin/python ]; then
+    if [ -f python27_install/bin/python ] ; then
         :
-    elif [ -f python27_install/bin/python.exe ]; then
+    elif [ -f python27_install/bin/python.exe ] ; then
         :
     else
         echo "error: python27_install/bin/python 未生成" >&2
