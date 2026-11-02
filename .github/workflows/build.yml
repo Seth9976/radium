@@ -108,7 +108,7 @@ jobs:
       #                  cd bin/packages; ./build.sh this_argument_is_not_used no
       # 不挑选/不排序/不改写任何 build_*,开关判断全部交给 build.sh 自身。
       # 所有 Radium 脚本均以"顶层程序"方式执行,绝不 source(否则 ${0} 指向 runner 临时脚本)。
-      - name: 构建捆绑依赖 (make packages)
+
       - name: 构建捆绑依赖 (make packages)
         run: |
           set -eo pipefail
