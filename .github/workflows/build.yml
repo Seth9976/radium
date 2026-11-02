@@ -7,9 +7,14 @@ on:
     branches: [ master, main ]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 180
     defaults:
       run:
         shell: msys2 {0}
@@ -21,6 +26,8 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # guile 是 check_dependencies.sh 的硬检查(mywhich guile);
+      # msys 仓库的 guile 可用,之前写的 mingw-w64-x86_64-guile 不存在
       - name: 初始化 MSYS2 与 MinGW64 工具链
         uses: msys2/setup-msys2@v2
         with:
@@ -29,7 +36,14 @@ jobs:
           cache: true
           suppress-deprecation-warnings: msystem-mingw64
           install: >-
-            base-devel git dos2unix patch tar unzip curl
+            base-devel
+            git
+            dos2unix
+            patch
+            tar
+            unzip
+            curl
+            guile
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-qt6-base
             mingw-w64-x86_64-qt6-svg
@@ -44,35 +58,90 @@ jobs:
             mingw-w64-x86_64-boost
             mingw-w64-x86_64-dlfcn
 
-      # 修复 (different line endings) + Qt 工具探测 + VST2 SDK 布局
-      - name: 规范化行尾、工具探测与 VST2 SDK 布局
+      # 复刻 configuration.sh: qmake-qt6 -> qmake;工具取 ${QT_HOST_LIBEXECS}/<tool> -> <tool>-qt6 -> <tool>
+      - name: 复刻 configuration.sh 探测 Qt 工具并布置 VST2 SDK
         run: |
           set -eo pipefail
 
-          echo "== 1) 规范化行尾（修复 patch 的 'different line endings'）=="
-          find pluginhost -type f $$ -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cpp' $$ \
-            -exec dos2unix {} + 2>/dev/null || true
-          find pluginhost -maxdepth 1 -type f $$ -name '*.diff' -o -name '*.patch' $$ \
-            -exec dos2unix {} + 2>/dev/null || true
+          echo "== 0) 行尾规范化(消除 patch 的 'different line endings') =="
+          for ext in h hpp c cpp diff patch; do
+            find pluginhost -type f -name "*.$ext" -exec dos2unix {} + 2>/dev/null || true
+          done
 
-          echo "== 2) Qt 工具探测（文档未指明具体文件名，多候选并 fail-fast）=="
-          pick() { for c in "$@"; do if command -v "$c" >/dev/null 2>&1; then command -v "$c"; return 0; fi; done; return 1; }
-          QMAKE_BIN="$(pick qmake6 qmake-qt6 qmake)" || { echo "::error::未找到 qmake"; exit 1; }
-          MOC_BIN="$(pick moc6 moc-qt6 moc)"         || { echo "::error::未找到 moc"; exit 1; }
-          UIC_BIN="$(pick uic6 uic-qt6 uic)"         || { echo "::error::未找到 uic"; exit 1; }
-          QSB_BIN="$(pick qsb6 qsb-qt6 qsb)"         || { echo "::error::未找到 qsb"; exit 1; }
-          echo "QMAKE=$QMAKE_BIN"; echo "MOC=$MOC_BIN"; echo "UIC=$UIC_BIN"; echo "QSB=$QSB_BIN"
+          echo "== 1) QMAKE 探测(qmake-qt6 -> qmake) =="
+          QMAKE_BIN=""
+          for c in qmake-qt6 qmake qmake6; do
+            if command -v "$c" >/dev/null 2>&1; then QMAKE_BIN="$(command -v "$c")"; break; fi
+          done
+          if [ -z "$QMAKE_BIN" ]; then
+            echo "::error::Could not find qmake-qt6 or qmake in path. Either: 1. set PATH. 2. Install qmake. 3. Set the QMAKE environment variable."
+            exit 1
+          fi
+          QT_VERSION="$("$QMAKE_BIN" -query QT_VERSION)"
+          echo "QMAKE=$QMAKE_BIN"
+          echo "QT_VERSION=$QT_VERSION"
+          case "$QT_VERSION" in
+            6*|7*) : ;;
+            *) echo "::error::Seems like $QMAKE_BIN has the wrong version. We need Qt 6 or newer."; exit 1 ;;
+          esac
 
-          echo "== 3) VST2 SDK 布局（供 #include <pluginterfaces/vst2.x/...> 解析）=="
+          echo "== 2) QT_INSTALL_LIBEXECS / QT_HOST_LIBEXECS =="
+          QT_INSTALL_LIBEXECS="$("$QMAKE_BIN" -query QT_INSTALL_LIBEXECS)"
+          QT_HOST_LIBEXECS="$("$QMAKE_BIN" -query QT_HOST_LIBEXECS)"
+          echo "QT_INSTALL_LIBEXECS=$QT_INSTALL_LIBEXECS"
+          echo "QT_HOST_LIBEXECS=$QT_HOST_LIBEXECS"
+          LIBEXECS_DIR="$(cygpath -u "$QT_INSTALL_LIBEXECS" 2>/dev/null || echo "$QT_INSTALL_LIBEXECS")"
+          HOST_LIBEXECS_DIR="$(cygpath -u "$QT_HOST_LIBEXECS" 2>/dev/null || echo "$QT_HOST_LIBEXECS")"
+
+          find_qt_tool() {
+            name="$1"
+            for dir in "$HOST_LIBEXECS_DIR" "$LIBEXECS_DIR"; do
+              [ -n "$dir" ] || continue
+              for f in "$dir/$name" "$dir/$name.exe"; do
+                if [ -f "$f" ]; then echo "$f"; return 0; fi
+              done
+            done
+            for c in "${name}-qt6" "$name"; do
+              if command -v "$c" >/dev/null 2>&1; then command -v "$c"; return 0; fi
+            done
+            for dir in "$HOST_LIBEXECS_DIR" "$LIBEXECS_DIR" /mingw64/lib/qt6 /mingw64/share/qt6 /mingw64/bin; do
+              [ -d "$dir" ] || continue
+              f="$(find "$dir" -maxdepth 4 -type f -name "${name}*.exe" -print -quit 2>/dev/null || true)"
+              if [ -n "$f" ]; then echo "$f"; return 0; fi
+            done
+            return 1
+          }
+
+          MOC_BIN="$(find_qt_tool moc)" || { echo "::error::Could not find moc-qt6 or moc (QT_HOST_LIBEXECS=$QT_HOST_LIBEXECS)"; exit 1; }
+          UIC_BIN="$(find_qt_tool uic)" || { echo "::error::Could not find uic-qt6 or uic"; exit 1; }
+          QSB_BIN="$(find_qt_tool qsb)" || { echo "::error::Could not find qsb-qt6 or qsb"; exit 1; }
+          echo "MOC=$MOC_BIN"
+          echo "UIC=$UIC_BIN"
+          echo "QSB=$QSB_BIN"
+          ( "$MOC_BIN" --version; "$UIC_BIN" --version; "$QSB_BIN" --version ) || true
+
+          echo "== 3) pkg-config --libs-only-L Qt6Core 判定 =="
+          LIBS_ONLY_L="$(pkg-config --libs-only-L Qt6Core 2>/dev/null | xargs || true)"
+          echo "libs-only-L Qt6Core: '${LIBS_ONLY_L}'"
+          ENV_EXTRA=""
+          if [ -z "$LIBS_ONLY_L" ]; then
+            ENV_EXTRA="QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=1"
+          fi
+
+          echo "== 4) VST2 SDK 布局(解析 #include <pluginterfaces/vst2.x/...>) =="
           for f in pluginterfaces/vst2.x/aeffect.h pluginterfaces/vst2.x/aeffectx.h \
-                   pluginterfaces/vst2.x/vstfxstore.h public.sdk/source/vst2.x/audioeffectx.h; do
+                   pluginterfaces/vst2.x/vstfxstore.h \
+                   public.sdk/source/vst2.x/audioeffect.h public.sdk/source/vst2.x/audioeffectx.h; do
             [ -f "$f" ] || { echo "::error::缺少 VST2 头文件: $f"; exit 1; }
           done
           mkdir -p .vstsdk/VST2_SDK .vstsdk/VST3_SDK
           cp -rf pluginterfaces public.sdk .vstsdk/VST2_SDK/
+          cp -rf pluginterfaces public.sdk /mingw64/include/
+
           REPO_MIXED="$(cygpath -m "$(pwd)")"
           VST_MIXED="$(cygpath -m "$(pwd)/.vstsdk")"
-          VST_INC="-I${REPO_MIXED} -I${REPO_MIXED}/pluginterfaces/vst2.x -I${REPO_MIXED}/public.sdk/source/vst2.x"
+          MINGW_INC_MIXED="$(cygpath -m /mingw64/include)"
+          VST_INC="-I${MINGW_INC_MIXED} -I${MINGW_INC_MIXED}/pluginterfaces/vst2.x -I${MINGW_INC_MIXED}/public.sdk/source/vst2.x"
           VST_INC="${VST_INC} -I${VST_MIXED}/VST2_SDK -I${VST_MIXED}/VST2_SDK/pluginterfaces/vst2.x -I${VST_MIXED}/VST2_SDK/public.sdk/source/vst2.x"
 
           {
@@ -82,13 +151,13 @@ jobs:
             echo "QSB=$QSB_BIN"
             echo "VSTSDK=$VST_MIXED"
             echo "VST_INCLUDES=$VST_INC"
-            echo "CPATH=${REPO_MIXED};${REPO_MIXED}/pluginterfaces/vst2.x;${REPO_MIXED}/public.sdk/source/vst2.x"
+            if [ -n "$ENV_EXTRA" ]; then echo "$ENV_EXTRA"; fi
           } >> "$GITHUB_ENV"
 
           echo "== 环境自检 =="
           gcc --version | head -n1
-          "$QMAKE_BIN" -v || true
-          pkg-config --modversion Qt6Core
+          pkg-config --modversion sndfile samplerate glib-2.0 Qt6Core
+          command -v guile && guile --version | head -n1
 
       - name: 探测并应用 JUCE 与 MinGW 专用补丁
         run: |
@@ -100,15 +169,15 @@ jobs:
             pluginhost/radium_midi_message_rt_alloc.diff \
             pluginhost/vst_dont_effopen_in_findAllTypesForFile_juce_issue_811.diff
           do
-            [ -f "$p" ] || { echo "跳过(文件不存在): $p"; continue; }
+            if [ ! -f "$p" ]; then echo "跳过(文件不存在): $p"; continue; fi
             dos2unix "$p" 2>/dev/null || true
-            if patch -p1 -N -i "$p"; then
+            if patch -p1 -N -l -i "$p"; then
               echo "已应用: $p"
             else
-              echo "::warning::$p 未应用（请查看 patch 自身输出判断原因）"
+              echo "::warning::$p 未应用(可能已被上游合并或存在差异),继续构建"
             fi
           done
-          find pluginhost -name '*.rej' -delete 2>/dev/null || true
+          find pluginhost -name "*.rej" -delete 2>/dev/null || true
 
       - name: 缓存捆绑依赖构建产物
         uses: actions/cache@v4
@@ -118,12 +187,15 @@ jobs:
             bin/packages/gc-8.2.8
             bin/packages/QScintilla_src-2.14.0
             bin/packages/fluidsynth-1.1.6
+            bin/packages/qhttpserver-master
             bin/packages/libgig
           key: radium-deps-mingw64-${{ hashFiles('bin/packages/build.sh', 'bin/packages/build_python27.sh', 'Makefile.Qt') }}
 
-      # 关键修复：check_dependencies.sh 要求 QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=1
-      # （日志原文："If this is correct, then simply set QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=1"）
-      - name: 构建捆绑依赖 (make packages)
+      # 等价于 make packages 生成的 makescript.sh:
+      #   export PYTHONEXE_NOT_AVAILABLE_YET=1; ./check_dependencies.sh test_packages;
+      #   cd bin/packages && ./build.sh ...; touch bin/packages/deletemetorebuild
+      # 差异仅是按 INCLUDE_*=0 跳过 Faust/Pd2 externals(build.sh 主块本就无条件构建它们)
+      - name: 构建捆绑依赖 (make packages 等价流程)
         run: |
           set -eo pipefail
           export INCLUDE_FAUSTDEV=0
@@ -133,12 +205,41 @@ jobs:
           export INCLUDE_PD2DEV=0
           export MY_CC=gcc
           export MY_CPP=g++
-          export PKGqt="pkg-config"
-          export QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=1
-          make packages VSTSDK="${VSTSDK}"
+          export PYTHONEXE_NOT_AVAILABLE_YET=1
+
+          ./check_dependencies.sh test_packages
+
+          (
+            cd bin/packages
+            source ./build.sh
+            source ./build_python27.sh
+            setup_build_environment
+            build_qhttpserver
+            build_gc
+            build_fluidsynth
+            build_python27
+            build_qscintilla
+            # INCLUDE_PD2DEV=0,libpd 不参与链接;仍尝试构建,失败仅告警
+            build_libpd || echo "::warning::libpd 构建失败(INCLUDE_PD2DEV=0,不影响主程序)"
+            # FaustDev / Pd externals 已由 INCLUDE_*=0 关闭,跳过:
+            #   if ! is_0 ${INCLUDE_FAUSTDEV:-0}; then build_faust; fi
+            #   if ! is_0 ${INCLUDE_PD2DEV:-0}; then build_pd_externals; fi
+          )
+
+          # find_python_path.sh 约定 bin/packages/python27_install/bin/python,做一次布局归一化
+          PYBIN=bin/packages/python27_install/bin
+          if [ ! -e "$PYBIN/python" ] && [ ! -e "$PYBIN/python.exe" ]; then
+            if [ -e "$PYBIN/python2.7.exe" ]; then cp -f "$PYBIN/python2.7.exe" "$PYBIN/python.exe"
+            elif [ -e "$PYBIN/python2.7" ]; then ln -sf python2.7 "$PYBIN/python"; fi
+          fi
+          PYTHONEXE="$(./find_python_path.sh)"
+          "$PYTHONEXE" -V || { echo "::error::python2.7 不可用: $PYTHONEXE"; exit 1; }
+
+          touch bin/packages/deletemetorebuild
           echo "== 依赖产物自检 =="
-          ls -la bin/packages/python27_install/bin || true
-          PY="$(./find_python_path.sh)" && "$PY" -V
+          ls -la bin/packages/python27_install/bin
+          ls -la bin/packages/gc-8.2.8/.libs/libgc.a bin/packages/QScintilla_src-2.14.0/src/libqscintilla2_qt6.a \
+                 bin/packages/fluidsynth-1.1.6/src/.libs/libfluidsynth.a
 
       - name: 编译 Radium (FULL_VERSION=1)
         run: |
@@ -152,14 +253,12 @@ jobs:
           export FAUST_USES_LLVM=0
           export INCLUDE_PDDEV=0
           export INCLUDE_PD2DEV=0
-          export QMAKE="${QMAKE}"
-          export MOC="${MOC}"
-          export UIC="${UIC}"
-          export QSB="${QSB}"
           export PKGqt="pkg-config"
-          export QMAKE_LIBS_ONLY_L_SHOULD_BE_EMPTY=1
+          : "${QMAKE:?QMAKE 未探测到}"
+          : "${MOC:?MOC 未探测到}"
+          : "${UIC:?UIC 未探测到}"
+          : "${QSB:?QSB 未探测到}"
           export PYTHONEXE="$(./find_python_path.sh)"
-          [ -n "${PYTHONEXE}" ] || PYTHONEXE="$(pwd)/bin/packages/python27_install/bin/python"
           "$PYTHONEXE" -V
           export OBJ_X11=""
           export OBJ_MACOSX=""
@@ -171,7 +270,7 @@ jobs:
           WIN_SYS_LIBS="-lcomdlg32 -limm32 -lole32 -loleaut32 -lrpcrt4 -lshlwapi -luuid -lversion -lwininet -lwinmm -lws2_32 -lwsock32 -lgdi32 -luser32 -lkernel32 -lcomctl32 -lsetupapi -lksuser -ldxgi -ldl"
           export OS_LDFLAGS="${WIN_SYS_LIBS}"
           make VSTSDK="${VSTSDK}" api/s7_types.h buildtype.opt flagopts.opt api/radium_proc.h common/keyboard_sub_ids.h --stop
-          make VSTSDK="${VSTSDK}" -j$(nproc) radium --stop
+          make VSTSDK="${VSTSDK}" -j"$(nproc)" radium --stop
           find bin/ -maxdepth 1 -name "*.exe" -exec strip --strip-all {} \;
 
       - name: 收集 Windows 发布依赖库并打包
@@ -186,14 +285,30 @@ jobs:
           done
           [ -n "$EXE" ] || { echo "::error::未找到主程序 exe"; exit 1; }
           echo "目标可执行文件: ${EXE}"
+
           WDEPLOY="$(command -v windeployqt6 || command -v windeployqt || true)"
-          if [ -n "$WDEPLOY" ]; then
-            "$WDEPLOY" --release --no-translations "$EXE" || echo "::warning::windeployqt 未完全成功"
-          else
-            echo "::warning::未找到 windeployqt，改用 DLL 收集"
+          if [ -z "$WDEPLOY" ]; then
+            WDEPLOY="$(find /mingw64 -maxdepth 5 -type f -name 'windeployqt*.exe' -print -quit 2>/dev/null || true)"
           fi
+          if [ -n "$WDEPLOY" ]; then
+            "$WDEPLOY" --release --no-translations "$EXE" || echo "::warning::windeployqt 未完全成功,继续手动收集"
+          else
+            echo "::warning::未找到 windeployqt,手动复制 Qt 运行时"
+            cp -f /mingw64/bin/Qt6*.dll release_package/ 2>/dev/null || true
+            for plugdir in /mingw64/share/qt6/plugins /mingw64/lib/qt6/plugins; do
+              for plug in platforms imageformats styles iconengines generic tls networkinformation; do
+                if [ -d "$plugdir/$plug" ]; then
+                  mkdir -p "release_package/$plug"
+                  cp -f "$plugdir/$plug"/*.dll "release_package/$plug/" 2>/dev/null || true
+                fi
+              done
+            done
+          fi
+
+          # 内嵌 Python 2.7 运行时(find_python_path.sh 指向的捆绑 python)
           cp -f bin/packages/python27_install/bin/*.dll release_package/ 2>/dev/null || true
           cp -f bin/packages/python27_install/lib/*.dll release_package/ 2>/dev/null || true
+          # MinGW 运行时与常见传递依赖
           find /mingw64/bin $$ \
               -name "libgcc_s_seh-1.dll" -o -name "libstdc++-6.dll" -o -name "libwinpthread-1.dll" \
               -o -name "libgomp-*.dll" -o -name "libsndfile-1.dll" -o -name "libsamplerate-0.dll" \
