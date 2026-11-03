@@ -26,7 +26,6 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # guile 为 check_dependencies.sh 硬检查(mywhich guile);file 用于二进制嗅探诊断
       - name: 初始化 MSYS2 与 MinGW64 工具链
         uses: msys2/setup-msys2@v2
         with:
@@ -97,8 +96,23 @@ jobs:
           pkg-config --modversion sndfile samplerate glib-2.0 Qt6Core
           command -v guile && guile --version | head -n1
 
-      # 全局 C 标准护栏: gcc/cc 统一注入 -std=gnu17
-      # 用途: 消除 GCC 16 默认 C23 与旧 C 代码的 false/true/bool 关键字冲突(asdl.h 即此例)
+      # 预检: 数据模型/平台方言/POSIX 符号,把关键信息先打印进日志
+      - name: 预检 - 平台方言与 POSIX 符号探测
+        run: |
+          set -eo pipefail
+          echo "== gcc 预定义宏(节选) =="
+          echo | gcc -dM -E - | grep -E "WIN32|MINGW|MSYS|__STDC_VERSION__|__x86_64__" || true
+          echo "== 探测 fcntl 控制常量 F_GETFD/F_SETFD/FD_CLOEXEC =="
+          echo '#include <fcntl.h>' > .ci_probe_fcntl.c
+          echo 'int main(void){ return F_GETFD + F_SETFD + FD_CLOEXEC; }' >> .ci_probe_fcntl.c
+          if gcc -std=gnu17 -c -o .ci_probe_fcntl.o .ci_probe_fcntl.c 2>.ci_probe_fcntl.err; then echo "常量可用"; else echo "::warning::MinGW 缺少 POSIX fcntl 控制常量,random.c 需护栏"; cat .ci_probe_fcntl.err; fi
+          rm -f .ci_probe_fcntl.c .ci_probe_fcntl.o .ci_probe_fcntl.err
+          echo "== 探测 fcntl() 声明 =="
+          echo '#include <fcntl.h>' > .ci_probe_decl.c
+          echo 'int main(void){ return fcntl(0, 0); }' >> .ci_probe_decl.c
+          if gcc -std=gnu17 -c -o .ci_probe_decl.o .ci_probe_decl.c 2>/dev/null; then echo "fcntl() 有声明"; else echo "::warning::fcntl() 无声明(隐式声明被静音,但引用会链接失败)"; fi
+          rm -f .ci_probe_decl.c .ci_probe_decl.o
+
       - name: 注入编译护栏 (gcc wrapper, -std=gnu17) 并自检
         run: |
           set -eo pipefail
@@ -112,15 +126,10 @@ jobs:
           chmod +x "$WRAPDIR/gcc" "$WRAPDIR/cc"
           echo "$WRAPDIR" >> "$GITHUB_PATH"
           export PATH="$WRAPDIR:$PATH"
-          echo "== 护栏自检 =="
-          command -v gcc
-          gcc --version | head -n1
-          echo 'int main(void){return 0;}' > .ci-stdcheck.c
-          gcc -c -o .ci-stdcheck.o .ci-stdcheck.c
           echo 'typedef enum {false, true} bool; int main(void){return (int)false;}' > .ci-asdl-check.c
           gcc -c -o .ci-asdl-check.o .ci-asdl-check.c
-          rm -f .ci-stdcheck.c .ci-stdcheck.o .ci-asdl-check.c .ci-asdl-check.o
-          echo "护栏生效: typedef enum {false,true} bool; 可编译"
+          rm -f .ci-asdl-check.c .ci-asdl-check.o
+          echo "护栏生效"
 
       - name: 探测并应用 JUCE 与 MinGW 专用补丁
         run: |
@@ -128,10 +137,10 @@ jobs:
           for p in pluginhost/mingw_compilation_fix2.diff pluginhost/mingw_compilation_fix_native_message_box.diff pluginhost/mingw_compilation_fix_timer.diff pluginhost/radium_midi_message_rt_alloc.diff pluginhost/vst_dont_effopen_in_findAllTypesForFile_juce_issue_811.diff; do if [ ! -f "$p" ]; then echo "跳过(不存在): $p"; continue; fi; dos2unix "$p" 2>/dev/null || true; if patch -p1 -N -l -i "$p"; then echo "已应用: $p"; else echo "::warning::$p 未应用(可能已被上游合并),继续构建"; fi; done
           find pluginhost -name "*.rej" -delete 2>/dev/null || true
 
-      # 先构建主程序所需依赖;build_faust/build_libpd/build_pd_externals 注释掉,等全绿后再逐个放开
       - name: 构建捆绑依赖 (make packages)
         run: |
           set -eo pipefail
+          unset PYTHONHASHSEED || true
           export INCLUDE_FAUSTDEV=0
           export INCLUDE_FAUSTDEV_BUT_NOT_LLVM=0
           export FAUST_USES_LLVM=0
@@ -146,8 +155,6 @@ jobs:
           dos2unix bin/packages/build.sh
           sed -i -E 's/^([[:space:]]*)build_faust([[:space:]]*)$/\1#build_faust/; s/^([[:space:]]*)build_libpd([[:space:]]*)$/\1#build_libpd/; s/^([[:space:]]*)build_pd_externals([[:space:]]*)$/\1#build_pd_externals/' bin/packages/build.sh
           for fn in build_faust build_libpd build_pd_externals; do if ! grep -qE "^[[:space:]]*#${fn}[[:space:]]*$" bin/packages/build.sh; then echo "::error::sed 未注释 ${fn}"; grep -nE 'build_faust|build_libpd|build_pd_externals' bin/packages/build.sh || true; exit 1; fi; done
-          echo "==== sed 验证通过,相关行: ===="
-          grep -nE 'build_faust|build_libpd|build_pd_externals' bin/packages/build.sh || true
           make packages
 
       - name: 嗅探目录结构并校验 packages 产物
@@ -170,13 +177,13 @@ jobs:
           test -f "$QH/build/moc_qhttpconnection.cpp" || { echo "::error::moc_qhttpconnection.cpp 未生成"; exit 1; }
           test -f "$QH/build/moc_qhttpserver.cpp" || { echo "::error::moc_qhttpserver.cpp 未生成"; exit 1; }
           test -f "$QH/lib/libqhttpserver.a" || { echo "::error::libqhttpserver.a 未生成"; exit 1; }
-          if [ -f "$QH/lib/libqhttpserverd.a" ]; then echo "::warning::出现了 libqhttpserverd.a,debug_and_release 可能没关掉"; fi
           for lib in bin/packages/gc-8.2.8/.libs/libgc.a bin/packages/fluidsynth-1.1.6/src/.libs/libfluidsynth.a bin/packages/QScintilla_src-2.14.0/src/libqscintilla2_qt6.a; do ls -la "$lib"; file "$lib" || true; done
           echo "packages 产物校验通过"
 
       - name: 编译 Radium (FULL_VERSION=1)
         run: |
           set -eo pipefail
+          unset PYTHONHASHSEED || true
           export FULL_VERSION=1
           export BUILDTYPE=RELEASE
           export TARGET_OS=windows
