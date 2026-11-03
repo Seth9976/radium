@@ -515,9 +515,14 @@ build_qscintilla() {
     patch -p0 < ../../qscintilla.patch
     make -j$(nproc)
 
-    if [ -f release/libqscintilla2_qt6.a ] && [ ! -f libqscintilla2_qt6.a ]; then
-        cp -f release/libqscintilla2_qt6.a libqscintilla2_qt6.a
-    fi
+    # 嗅探并对齐生成静态库的命名与路径
+    for f in release/libqscintilla2_qt6.a release/libqscintilla2.a libqscintilla2.a libqscintilla2_qt6.a ; do
+        if [ -f "$f" ]; then
+            echo "嗅探到 QScintilla 静态库: $f"
+            cp -f "$f" libqscintilla2_qt6.a
+            break
+        fi
+    done
 
     cd ../..
     assert_file_exists QScintilla_src-2.14.0/src/libqscintilla2_qt6.a
