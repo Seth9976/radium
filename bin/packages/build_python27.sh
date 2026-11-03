@@ -88,15 +88,26 @@ END
         patch -p0 < ../python27_disable_linux.patch
     fi
 
-    # 针对 Windows x64 (LLP64) 修正 pid_t 大于 long 的历史类型检查错误
-    sed -i 's/#   error "Python doesn'\''t support sizeof(pid_t) > sizeof(long)"/#   if !defined(__MINGW32__) \&\& !defined(_WIN32)\n#       error "Python doesn'\''t support sizeof(pid_t) > sizeof(long)"\n#   endif/' Include/pyport.h
+    # ---- Windows/LLP64 适配一: pyport.h 的 sizeof(pid_t) > sizeof(long) 静态检查 ----
+    # Win64 (LLP64) 下 long 为 4 字节,该检查会误判。以 __MINGW32__ 标记做幂等防护。
+    if ! grep -q "__MINGW32__" Include/pyport.h ; then
+        sed -i 's/#   error "Python doesn'\''t support sizeof(pid_t) > sizeof(long)"/#   if !defined(__MINGW32__) \&\& !defined(_WIN32)\n#       error "Python doesn'\''t support sizeof(pid_t) > sizeof(long)"\n#   endif/' Include/pyport.h
+        echo "== pyport.h LLP64 护栏已注入 =="
+    else
+        echo "== pyport.h 护栏已存在,跳过 =="
+    fi
+    grep -n "sizeof(pid_t)" Include/pyport.h || true
 
+    # ---- Windows/LLP64 适配二: 强制 gnu17,消除 C23 关键字 false/true/bool 与
+    #      Include/asdl.h 的 typedef enum {false, true} bool; 的冲突;
+    #      同时静音 %zd 与 Py_ssize_t(long long) 的 -Wformat 噪声。
     local ARCH_FLAGS=""
     if uname | grep Darwin >/dev/null ; then
         ARCH_FLAGS="-arch arm64 -arch x86_64 -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET:-14.0}"
     fi
 
-    local PY_COMPAT_FLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-incompatible-pointer-types -Wno-int-conversion -Wno-return-mismatch"
+    local PY_STD_FLAGS="-std=gnu17"
+    local PY_COMPAT_FLAGS="$PY_STD_FLAGS -Wno-error -Wno-implicit-function-declaration -Wno-incompatible-pointer-types -Wno-int-conversion -Wno-return-mismatch -Wno-format -Wno-format-extra-args"
     local PY_CFLAGS="-fPIC -fno-strict-aliasing -O2 $PY_COMPAT_FLAGS $ARCH_FLAGS"
     local PY_LIBS="-lversion -lshlwapi -lws2_32 -lshell32"
 
@@ -108,18 +119,41 @@ END
     export LD_LIBRARY_PATH="$(realpath $(pwd)/../python27_install/lib)"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     cd ..
 
-    # 在 Windows 环境下对齐可执行文件名并建立共享库映射
-    if [ -f python27_install/bin/python.exe ] && [ ! -f python27_install/bin/python ]; then
+    # ---- 安装产物嗅探与归一化(打印到 CI 日志便于诊断) ----
+    echo "==== 嗅探 python27_install 目录结构 ===="
+    find python27_install -maxdepth 3 -print || true
+    ls -la python27_install/bin || true
+    ls -la python27_install/lib || true
+
+    if [ -f python27_install/bin/python.exe ] && [ ! -f python27_install/bin/python ] ; then
         cp -f python27_install/bin/python.exe python27_install/bin/python
     fi
-    if [ -f python27_install/lib/libpython2.7.so ] && [ ! -f python27_install/lib/libpython2.7.dll ]; then
-        cp -f python27_install/lib/libpython2.7.so python27_install/lib/libpython2.7.dll
-        cp -f python27_install/lib/libpython2.7.so python27_install/bin/libpython2.7.dll
+    if [ ! -f python27_install/bin/python ] && [ -f python27_install/bin/python2.7.exe ] ; then
+        cp -f python27_install/bin/python2.7.exe python27_install/bin/python
     fi
 
-    echo "==== 嗅探 python27_install 安装产物 ===="
-    ls -la python27_install/bin
-    ls -la python27_install/lib
+    local LIBDIR=python27_install/lib
+    if [ -f "$LIBDIR/libpython2.7.so" ] && [ ! -f "$LIBDIR/libpython2.7.dll" ] ; then
+        cp -f "$LIBDIR/libpython2.7.so" "$LIBDIR/libpython2.7.dll"
+    fi
+    if [ -f "$LIBDIR/libpython2.7.dll" ] && [ ! -f python27_install/bin/libpython2.7.dll ] ; then
+        cp -f "$LIBDIR/libpython2.7.dll" python27_install/bin/libpython2.7.dll
+    fi
+    if [ ! -f "$LIBDIR/libpython2.7.dll.a" ] && [ -f "$LIBDIR/libpython2.7.dll" ] && command -v gendef >/dev/null 2>&1 ; then
+        ( cd "$LIBDIR" && gendef libpython2.7.dll && dlltool -d libpython2.7.def -l libpython2.7.dll.a ) || true
+    fi
+
+    echo "==== 二进制信息嗅探 ===="
+    if command -v file >/dev/null 2>&1 ; then
+        file python27_install/bin/python.exe || true
+        for so in "$LIBDIR"/libpython2.7* ; do file "$so" || true ; done
+    fi
+    for so in python27_install/bin/libpython2.7.dll "$LIBDIR"/libpython2.7.dll ; do
+        if [ -f "$so" ] ; then
+            echo "-- DLL 依赖: $so"
+            objdump -p "$so" | grep "DLL Name" || true
+        fi
+    done
 
     if [ -f python27_install/bin/python ] || [ -f python27_install/bin/python.exe ] ; then
         echo "验证成功: Python 解释器二进制文件存在"
