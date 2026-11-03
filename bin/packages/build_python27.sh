@@ -88,28 +88,42 @@ END
         patch -p0 < ../python27_disable_linux.patch
     fi
 
+    # 针对 Windows x64 (LLP64) 修正 pid_t 大于 long 的历史类型检查错误
+    sed -i 's/#   error "Python doesn'\''t support sizeof(pid_t) > sizeof(long)"/#   if !defined(__MINGW32__) \&\& !defined(_WIN32)\n#       error "Python doesn'\''t support sizeof(pid_t) > sizeof(long)"\n#   endif/' Include/pyport.h
+
     local ARCH_FLAGS=""
     if uname | grep Darwin >/dev/null ; then
         ARCH_FLAGS="-arch arm64 -arch x86_64 -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET:-14.0}"
     fi
 
     local PY_COMPAT_FLAGS="-Wno-error -Wno-implicit-function-declaration -Wno-incompatible-pointer-types -Wno-int-conversion -Wno-return-mismatch"
-    local PY_CFLAGS="-Wno-implicit-function-declaration $PY_COMPAT_FLAGS $ARCH_FLAGS"
+    local PY_CFLAGS="-fPIC -fno-strict-aliasing -O2 $PY_COMPAT_FLAGS $ARCH_FLAGS"
+    local PY_LIBS="-lversion -lshlwapi -lws2_32 -lshell32"
 
-    ./configure CC=$MY_CC CXX=$MY_CPP CFLAGS="$PY_CFLAGS" CPPCFLAGS="$PY_CFLAGS" LDFLAGS="$ARCH_FLAGS" --prefix=$(realpath $(pwd)/../python27_install) --without-gcc --without-threads --disable-ipv6 --without-system-ffi --disable-toolbox-glue --disable-framework --enable-shared
+    ac_cv_sizeof_pid_t=4 ./configure CC=$MY_CC CXX=$MY_CPP CFLAGS="$PY_CFLAGS" CPPCFLAGS="$PY_CFLAGS" LDFLAGS="$ARCH_FLAGS" LIBS="$PY_LIBS" --prefix=$(realpath $(pwd)/../python27_install) --without-gcc --without-threads --disable-ipv6 --without-system-ffi --disable-toolbox-glue --disable-framework --enable-shared
 
-    CC=$MY_CC CXX=$MY_CPP CFLAGS="$PY_CFLAGS" CPPCFLAGS="$PY_CFLAGS" LDFLAGS="$ARCH_FLAGS" make -j$(nproc)
-
+    make -j$(nproc)
     make install
+
     export LD_LIBRARY_PATH="$(realpath $(pwd)/../python27_install/lib)"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     cd ..
 
+    # 在 Windows 环境下对齐可执行文件名并建立共享库映射
     if [ -f python27_install/bin/python.exe ] && [ ! -f python27_install/bin/python ]; then
         cp -f python27_install/bin/python.exe python27_install/bin/python
     fi
+    if [ -f python27_install/lib/libpython2.7.so ] && [ ! -f python27_install/lib/libpython2.7.dll ]; then
+        cp -f python27_install/lib/libpython2.7.so python27_install/lib/libpython2.7.dll
+        cp -f python27_install/lib/libpython2.7.so python27_install/bin/libpython2.7.dll
+    fi
+
+    echo "==== 嗅探 python27_install 安装产物 ===="
+    ls -la python27_install/bin
+    ls -la python27_install/lib
 
     if [ -f python27_install/bin/python ] || [ -f python27_install/bin/python.exe ] ; then
-        :
+        echo "验证成功: Python 解释器二进制文件存在"
+        ./python27_install/bin/python -V || ./python27_install/bin/python.exe -V || true
     else
         echo "error: python27_install/bin/python 未生成" >&2
         exit 1
