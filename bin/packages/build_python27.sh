@@ -89,7 +89,6 @@ END
     fi
 
     # ---- Windows/LLP64 适配一: pyport.h 的 sizeof(pid_t) > sizeof(long) 静态检查 ----
-    # Win64 (LLP64) 下 long 为 4 字节,该检查会误判。以 __MINGW32__ 标记做幂等防护。
     if ! grep -q "__MINGW32__" Include/pyport.h ; then
         sed -i 's/#   error "Python doesn'\''t support sizeof(pid_t) > sizeof(long)"/#   if !defined(__MINGW32__) \&\& !defined(_WIN32)\n#       error "Python doesn'\''t support sizeof(pid_t) > sizeof(long)"\n#   endif/' Include/pyport.h
         echo "== pyport.h LLP64 护栏已注入 =="
@@ -98,9 +97,20 @@ END
     fi
     grep -n "sizeof(pid_t)" Include/pyport.h || true
 
-    # ---- Windows/LLP64 适配二: 强制 gnu17,消除 C23 关键字 false/true/bool 与
-    #      Include/asdl.h 的 typedef enum {false, true} bool; 的冲突;
-    #      同时静音 %zd 与 Py_ssize_t(long long) 的 -Wformat 噪声。
+    # ---- Windows/LLP64 适配二: random.c 的 POSIX fcntl 控制常量 ----
+    # MinGW-w64 的 fcntl.h 有 O_* 但无 F_GETFD/F_SETFD/FD_CLOEXEC,且 fcntl() 无声明
+    # (链接期会 undefined reference)。该块源码注释即 "ignore errors" 的尽力而为设置,直接编译隔离。
+    local RANDOM_C=Python/random.c
+    if ! grep -q "RAD_PATCH_MINGW_FCNTL" "$RANDOM_C" ; then
+        sed -i 's|^        attr = fcntl(fd, F_GETFD);|        /* RAD_PATCH_MINGW_FCNTL */\n#if defined(F_GETFD) \&\& defined(F_SETFD) \&\& defined(FD_CLOEXEC)\n        attr = fcntl(fd, F_GETFD);|' "$RANDOM_C"
+        sed -i 's|^            (void)fcntl(fd, F_SETFD, attr);|            (void)fcntl(fd, F_SETFD, attr);\n#endif /* RAD_PATCH_MINGW_FCNTL */|' "$RANDOM_C"
+        echo "== random.c fcntl 护栏已注入 =="
+    else
+        echo "== random.c fcntl 护栏已存在,跳过 =="
+    fi
+    grep -n "RAD_PATCH_MINGW_FCNTL\|F_GETFD\|F_SETFD\|FD_CLOEXEC" "$RANDOM_C" || true
+
+    # ---- 编译标志: 强制 gnu17(消除 C23 关键字冲突) + 静音 %zd 告警 ----
     local ARCH_FLAGS=""
     if uname | grep Darwin >/dev/null ; then
         ARCH_FLAGS="-arch arm64 -arch x86_64 -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET:-14.0}"
@@ -111,7 +121,15 @@ END
     local PY_CFLAGS="-fPIC -fno-strict-aliasing -O2 $PY_COMPAT_FLAGS $ARCH_FLAGS"
     local PY_LIBS="-lversion -lshlwapi -lws2_32 -lshell32"
 
+    # 预防: 不设 PYTHONHASHSEED,避免 _PyRandom_Init 走 dev_urandom_noraise -> Py_FatalError("Failed to open /dev/urandom")
+    unset PYTHONHASHSEED || true
+
     ac_cv_sizeof_pid_t=4 ./configure CC=$MY_CC CXX=$MY_CPP CFLAGS="$PY_CFLAGS" CPPCFLAGS="$PY_CFLAGS" LDFLAGS="$ARCH_FLAGS" LIBS="$PY_LIBS" --prefix=$(realpath $(pwd)/../python27_install) --without-gcc --without-threads --disable-ipv6 --without-system-ffi --disable-toolbox-glue --disable-framework --enable-shared
+
+    echo "==== 嗅探 pyconfig.h 关键宏(CI 诊断用) ===="
+    grep -nE "MS_WINDOWS|HAVE_FCNTL_H|HAVE_UNISTD_H|HAVE_FORK|HAVE_GETRANDOM|HAVE_GETENTROPY|HAVE_DEV_URANDOM|HAVE_FSTAT|SIZEOF_PID_T|SIZEOF_LONG|SIZEOF_VOID_P|SIZEOF_SIZE_T" pyconfig.h || true
+    echo "==== 扫描其余 F_GETFD/F_SETFD/FD_CLOEXEC 潜在引用点 ===="
+    grep -rn "F_GETFD\|F_SETFD\|FD_CLOEXEC" --include="*.c" --include="*.h" . | grep -v "RAD_PATCH_MINGW_FCNTL" || true
 
     make -j$(nproc)
     make install
@@ -119,7 +137,6 @@ END
     export LD_LIBRARY_PATH="$(realpath $(pwd)/../python27_install/lib)"${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
     cd ..
 
-    # ---- 安装产物嗅探与归一化(打印到 CI 日志便于诊断) ----
     echo "==== 嗅探 python27_install 目录结构 ===="
     find python27_install -maxdepth 3 -print || true
     ls -la python27_install/bin || true
