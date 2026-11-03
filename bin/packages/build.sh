@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
 set -eEu
-# 兜底 helper：若 helpers.sh 未被 source 到（例如 configuration.sh 变了路径），
-# 也能保证 build_* 里用到的函数一定存在。行为与 helpers.sh 中同名函数等价。
+
 if ! declare -F untar_allow_symlink_fail >/dev/null 2>&1 ; then
     untar_allow_symlink_fail() {
         local flag="$1"
@@ -12,6 +11,7 @@ if ! declare -F untar_allow_symlink_fail >/dev/null 2>&1 ; then
         return 0
     }
 fi
+
 if ! declare -F assert_file_exists >/dev/null 2>&1 ; then
     assert_file_exists() {
         if [ ! -f "$1" ] ; then
@@ -20,6 +20,7 @@ if ! declare -F assert_file_exists >/dev/null 2>&1 ; then
         fi
     }
 fi
+
 if ! declare -F assert_dir >/dev/null 2>&1 ; then
     assert_dir() {
         if [ ! -d "$1" ] ; then
@@ -28,110 +29,72 @@ if ! declare -F assert_dir >/dev/null 2>&1 ; then
         fi
     }
 fi
-#set -x
 
 setup_build_environment() {
+    export PYTHONEXE_NOT_AVAILABLE_YET=1
 
-	export PYTHONEXE_NOT_AVAILABLE_YET=1
+    pushd ../../
+    source configuration.sh
+    popd
 
-	# Might want to uncomment the line below to make faust build with support for llvm.
-	#export RADIUM_USE_CLANG=1
+    unset CFLAGS
+    unset CPPFLAGS
+    unset LDFLAGS
+    unset CXXFLAGS
 
-	#export INCLUDE_FAUSTDEV_BUT_NOT_LLVM=1 # Don't push!
+    RELEASE_BUILD=true
 
-	pushd ../../
-	source configuration.sh
-	popd
+    if $RELEASE_BUILD ; then
+        export COMMON_CFLAGS="-mtune=generic -fPIC -fno-strict-aliasing -Wno-misleading-indentation "
+    else
+        export COMMON_CFLAGS="-ggdb3 -fno-omit-frame-pointer -fPIC -fno-strict-aliasing -Wno-misleading-indentation "
+    fi
 
-	unset CFLAGS
-	unset CFLAGS
-	unset CPPFLAGS
-	unset LDFLAGS
-	unset CXXFLAGS
+    if uname -s | grep Darwin >/dev/null ; then
+        if [[ -z "${MACOSX_DEPLOYMENT_TARGET}" ]]; then
+            echo "MACOSX_DEPLOYMENT_TARGET not set"
+            exit -1
+        fi
+        export COMMON_CFLAGS="$COMMON_CFLAGS -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
+        export DARWIN_ARCH_FLAGS="-arch arm64 -arch x86_64 "
+        export DARWIN_MIN_FLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
+        export DARWIN_CMAKEOPT="-DCMAKE_OSX_ARCHITECTURES=\"arm64;x86_64\" -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}"
+    else
+        export DARWIN_ARCH_FLAGS=""
+        export DARWIN_MIN_FLAGS=""
+        export DARWIN_CMAKEOPT=""
+    fi
 
-	RELEASE_BUILD=true
-	#RELEASE_BUILD=false
+    if ! arch | grep -E "arm|aarch64" >/dev/null ; then
+        export COMMON_CFLAGS="$COMMON_CFLAGS -msse2 -mfpmath=sse "
+    fi
 
-	if $RELEASE_BUILD ; then
-		export COMMON_CFLAGS="-mtune=generic -fPIC -fno-strict-aliasing -Wno-misleading-indentation "
-	else
-		export COMMON_CFLAGS="-ggdb3 -fno-omit-frame-pointer -fPIC -fno-strict-aliasing -Wno-misleading-indentation "
-	fi
+    if [[ $RADIUM_USE_CLANG == 0 ]] ; then
+        export COMMON_CFLAGS="$COMMON_CFLAGS -fmax-errors=5 "
+    fi
 
-	if uname -s |grep Darwin ; then
-		if [[ -z "${MACOSX_DEPLOYMENT_TARGET}" ]]; then
-			echo "MACOSX_DEPLOYMENT_TARGET not set"
-			exit -1
-		fi
-		export COMMON_CFLAGS="$COMMON_CFLAGS -mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
-		# Universal binaries. (Used for faust, fluidsynth, qscintilla, etc.)
-		export DARWIN_ARCH_FLAGS="-arch arm64 -arch x86_64 "
-		export DARWIN_MIN_FLAGS="-mmacosx-version-min=${MACOSX_DEPLOYMENT_TARGET}"
-		export DARWIN_CMAKEOPT="-DCMAKE_OSX_ARCHITECTURES=\"arm64;x86_64\" -DCMAKE_OSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET}"
-	else
-		export DARWIN_ARCH_FLAGS=""
-		export DARWIN_MIN_FLAGS=""
-		export DARWIN_CMAKEOPT=""
-	fi
-	
-	if ! arch |grep -e arm -e aarch64 ; then
-		export COMMON_CFLAGS="$COMMON_CFLAGS -msse2 -mfpmath=sse "
-	fi
+    set_var QT_CPPFLAGS ""
+    set_var QT_LDFLAGS ""
 
-	if [[ $RADIUM_USE_CLANG == 0 ]] ; then
-		export COMMON_CFLAGS="$COMMON_CFLAGS -fmax-errors=5 "
-	fi
+    export CFLAGS="$COMMON_CFLAGS "
+    export CPPFLAGS="$QT_CPPFLAGS $COMMON_CFLAGS "
+    export CXXFLAGS="$QT_CPPFLAGS $COMMON_CFLAGS "
+    export LDFLAGS="$QT_LDFLAGS"
 
-	set_var QT_CPPFLAGS ""
-	set_var QT_LDFLAGS ""
+    DASCC=gcc
+    DASCXX=g++
 
-	export CFLAGS="$COMMON_CFLAGS "
-	export CPPFLAGS="$QT_CPPFLAGS $COMMON_CFLAGS "
-	export CXXFLAGS="$QT_CPPFLAGS $COMMON_CFLAGS "
-	export LDFLAGS="$QT_LDFLAGS"
+    if ! is_0 $RADIUM_USE_CLANG ; then
+        DASCC=clang
+        DASCXX=clang++
+    fi
 
-	DASCC=gcc
-	DASCXX=g++
-
-
-	if ! is_0 $RADIUM_USE_CLANG ; then
-		DASCC=clang
-		DASCXX=clang++
-	fi
-
-
-
-
-	#rm -f /tmp/radium
-	#ln -s `pwd` /tmp/radium
-	PWD=`pwd`
-	PREFIX=`dirname $PWD/$0`
-	#echo $PREFIX
-	#exit
-
+    PWD=$(pwd)
+    PREFIX=$(dirname "$PWD/$0")
 }
 
-#http://www.python.org
-#tar xvzf Python-2.2.2.tgz
-#cd Python-2.2.2
-#./configure --prefix=/tmp/radium --with-threads
-#make
-#make install
-#cd ..
-
-
-
-#tar xvf setxkbmap_56346c72127303a445a273217f7633c2afb29cfc.tar
-#cd setxkbmap
-#make clean
-#./configure --prefix=/usr
-#make
-#cd ..
-
-
 build_faust() {
-
-    rm -fr faust
+    rm -rf faust
     untar_allow_symlink_fail xvzf faust-2.88.0.tar.gz
     assert_dir faust-2.88.0
     assert_file_exists faust-2.88.0/Makefile
@@ -173,10 +136,9 @@ build_faust() {
 }
 
 build_libpds() {
+    local NOWARNS="-Wno-return-mismatch -Wno-implicit-function-declaration -Wno-int-conversion -Wno-implicit-int -Wno-strict-prototypes -Wno-incompatible-pointer-types -std=gnu17"
 
-    NOWARNS="-Wno-return-mismatch -Wno-implicit-function-declaration -Wno-int-conversion -Wno-implicit-int -Wno-strict-prototypes -Wno-incompatible-pointer-types -std=gnu17"
-    
-    rm -fr libpd-master
+    rm -rf libpd-master
     tar xvzf libpd-master.tar.gz
     cd libpd-master/
     sed -i.backup "/define CFLAGS/ s|\")| -I/usr/include/tirpc $NOWARNS\")|" make.scm
@@ -184,23 +146,19 @@ build_libpds() {
     sed -i.backup 's/oscx //' make.scm
     sed -i.backup "s/gcc -O3/gcc -fcommon -O3 $NOWARNS/" make.scm
 
-    GLIBCVERSION=`ldd --version | head -n 1 | awk '{print $NF}'`
-    if [[ $GLIBCVERSION > 2.34 ]] ; then
-		sed -i.backup 's/#define fsqrt sqrt/#include <math.h>\nstatic float fsqrt(float val){return sqrt(val);}/g' pure-data/extra/fiddle~/fiddle~.c
-		sed -i.backup 's/fsqrt/myfsqrt/g' pure-data/extra/fiddle~/fiddle~.c
+    local GLIBCVERSION=$(ldd --version 2>/dev/null | head -n 1 | awk '{print $NF}' || true)
+    if [[ "$GLIBCVERSION" > "2.34" ]] ; then
+        sed -i.backup 's/#define fsqrt sqrt/#include <math.h>\nstatic float fsqrt(float val){return sqrt(val);}/g' pure-data/extra/fiddle~/fiddle~.c
+        sed -i.backup 's/fsqrt/myfsqrt/g' pure-data/extra/fiddle~/fiddle~.c
     fi
-    
+
     make clean
-    CPPFLAGS="$CFLAGS $NOWARNS" make -j`nproc`
+    CPPFLAGS="$CFLAGS $NOWARNS" make -j$(nproc)
     cd ..
 }
 
-
-# Official libpd (https://github.com/libpd/libpd), tracking current Pd Vanilla.
-# Built with multiple instance support (PDINSTANCE/PDTHREADS).
 build_libpd() {
-
-    rm -fr libpd
+    rm -rf libpd
     untar_allow_symlink_fail xvzf libpd-0.16.1.tar.gz
     assert_dir libpd
     assert_file_exists libpd/Makefile
@@ -214,7 +172,7 @@ build_libpd() {
     local LIBPD_DEBUG_FLAGS="-g -fno-omit-frame-pointer ${LIBPD_EXTRA_CFLAGS:-}"
     local LIBPD_LINK_FLAGS=""
 
-    if uname -s |grep Darwin ; then
+    if uname -s | grep Darwin >/dev/null ; then
         LIBPD_DEBUG_FLAGS="$LIBPD_DEBUG_FLAGS $DARWIN_ARCH_FLAGS $DARWIN_MIN_FLAGS"
         LIBPD_LINK_FLAGS="$DARWIN_ARCH_FLAGS $DARWIN_MIN_FLAGS"
         LIBPD_LINK_FLAGS="$LIBPD_LINK_FLAGS -Wl,-install_name,@executable_path/packages/libpd/libs/libpd.dylib"
@@ -233,42 +191,25 @@ build_libpd() {
     fi
 
     make clean
-    make -j`nproc` libpd STATIC=true MULTI=true UTIL=true EXTRA=true ADDITIONAL_CFLAGS="$LIBPD_DEBUG_FLAGS" ADDITIONAL_LDFLAGS="$LIBPD_LINK_FLAGS"
+    make -j$(nproc) libpd STATIC=true MULTI=true UTIL=true EXTRA=true ADDITIONAL_CFLAGS="$LIBPD_DEBUG_FLAGS" ADDITIONAL_LDFLAGS="$LIBPD_LINK_FLAGS"
 
     cd ..
     assert_dir libpd/libpd_wrapper
     assert_file_exists libpd/pure-data/src/m_pd.h
 }
 
-
-# Build the self-contained Wish.app that the Pd2 instrument uses to show the
-# Pd GUI (tcl/pd-gui.tcl). It is installed as libpd/Wish.app, next to the
-# pure-data directory, where the patched sys_startgui() looks for it before
-# falling back to a Wish/Tcl-Tk installed on the machine.
-#
-# wish is just the Tk shell, so this bundles both Tcl (interpreter + script
-# library) and Tk (widgets + script library) as frameworks inside the app,
-# built from the pinned tarballs. The "embedded" make targets are the ones
-# pure-data uses (see pure-data/mac/tcltk-wish.sh).
-#
-# The build is universal (x86_64+arm64) with the same macOS deployment target
-# as the rest of Radium, since create_app.sh checks every Mach-O file in the
-# app bundle.
 build_tcltk_wish_darwin() {
-
-    # Note: the framework dir is "Versions/8.6" for all 8.6.x releases.
-    TCLTK_VERSION=8.6.17
-    TCLTK_FRAMEWORK_VERSION=8.6
-    WISH_DIR="`pwd`/tcltk-wish-embedded"
-    WISH_APP="`pwd`/libpd/Wish.app"
+    local TCLTK_VERSION=8.6.17
+    local TCLTK_FRAMEWORK_VERSION=8.6
+    local WISH_DIR="$(pwd)/tcltk-wish-embedded"
+    local WISH_APP="$(pwd)/libpd/Wish.app"
 
     if [ ! -e libpd/pure-data/tcl/pd-gui.tcl ]; then
-        echo "build_tcltk_wish: libpd has not been extracted yet (missing libpd/pure-data/tcl/pd-gui.tcl). Run build_libpd first." >&2
+        echo "build_tcltk_wish: libpd has not been extracted yet. Run build_libpd first." >&2
         exit 1
     fi
 
     rm -rf tcl$TCLTK_VERSION tk$TCLTK_VERSION "$WISH_DIR" build
-
     tar xvzf tcl$TCLTK_VERSION-src.tar.gz
     tar xvzf tk$TCLTK_VERSION-src.tar.gz
 
@@ -280,14 +221,9 @@ build_tcltk_wish_darwin() {
     rm -rf "$WISH_APP"
     cp -a "$WISH_DIR/Applications/Utilities/Wish.app" "$WISH_APP"
 
-    # Tk's install-embedded is supposed to point the Wish binary to the
-    # frameworks inside the app, but its install_name_tool invocation fails
-    # with current Xcode versions, leaving references to /Library/Frameworks
-    # (where Tcl/Tk normally is not installed) in place. Fix the install
-    # names here instead.
     chmod -R u+w "$WISH_APP"
-    TCL_FRAMEWORK=/Library/Frameworks/Tcl.framework/Versions/$TCLTK_FRAMEWORK_VERSION/Tcl
-    TK_FRAMEWORK=/Library/Frameworks/Tk.framework/Versions/$TCLTK_FRAMEWORK_VERSION/Tk
+    local TCL_FRAMEWORK=/Library/Frameworks/Tcl.framework/Versions/$TCLTK_FRAMEWORK_VERSION/Tcl
+    local TK_FRAMEWORK=/Library/Frameworks/Tk.framework/Versions/$TCLTK_FRAMEWORK_VERSION/Tk
     install_name_tool -change $TCL_FRAMEWORK @executable_path/../Frameworks/Tcl.framework/Versions/$TCLTK_FRAMEWORK_VERSION/Tcl "$WISH_APP/Contents/MacOS/Wish"
     install_name_tool -change $TK_FRAMEWORK @executable_path/../Frameworks/Tk.framework/Versions/$TCLTK_FRAMEWORK_VERSION/Tk "$WISH_APP/Contents/MacOS/Wish"
     install_name_tool -id @executable_path/../Frameworks/Tcl.framework/Versions/$TCLTK_FRAMEWORK_VERSION/Tcl "$WISH_APP/Contents/Frameworks/Tcl.framework/Versions/$TCLTK_FRAMEWORK_VERSION/Tcl"
@@ -296,50 +232,23 @@ build_tcltk_wish_darwin() {
     rm -rf tcl$TCLTK_VERSION tk$TCLTK_VERSION "$WISH_DIR" build
 }
 
-
-# Build/install the self-contained antialiased Tcl/Tk wish that the Pd2
-# instrument uses to show the Pd GUI on Linux. It is installed as
-# libpd/pure-data/bin/wish, where libpd patch 20-linux-bundled-wish.patch makes
-# sys_startgui() look for it.
-#
-# install_tcltk_aa_linux.sh installs a prebuilt wish from ~/tlc_tk_antialiased
-# when one is available (a development shortcut). Otherwise the sources
-# vendored in this directory are built by build_tcltk_wish_linux.sh, so a
-# fresh clone works without any local Tcl/Tk build.
 build_tcltk_wish_linux() {
-
-    TCLTK_DEST="`pwd`/libpd/pure-data"
+    local TCLTK_DEST="$(pwd)/libpd/pure-data"
 
     if [ ! -e "$TCLTK_DEST/tcl/pd-gui.tcl" ]; then
-        echo "build_tcltk_wish_linux: libpd has not been extracted yet (missing $TCLTK_DEST/tcl/pd-gui.tcl). Run build_libpd first." >&2
+        echo "build_tcltk_wish_linux: libpd has not been extracted yet. Run build_libpd first." >&2
         exit 1
     fi
 
-    if ! "`pwd`/install_tcltk_aa_linux.sh" --dest "$TCLTK_DEST" ; then
-        "`pwd`/build_tcltk_wish_linux.sh" --dest "$TCLTK_DEST"
+    if ! "$(pwd)/install_tcltk_aa_linux.sh" --dest "$TCLTK_DEST" ; then
+        "$(pwd)/build_tcltk_wish_linux.sh" --dest "$TCLTK_DEST"
     fi
 }
 
-
-# Build the dynamically loaded Pd externals used by the Pd2 instrument.
-# The library list, pinned sources and per-library build options live in
-# pd_externals/pd_externals.list. The externals are compiled against the
-# libpd headers with the same multi-instance settings as libpd itself
-# (-DPDINSTANCE -DPDTHREADS), since pd_this is a TLS symbol and the
-# s_float/s_list globals are per-instance macros that are not exported by
-# the MULTI build of libpd.
-#
-# Each library is installed into its own subdirectory of bin/pd/externals;
-# the Pd2 instrument adds every subdirectory to its search path.
-#
-# The author/copyright/license keys in the manifest are written to
-# pd/externals/pd2-externals-credits.txt, which the Help menu's "List of
-# included Pd externals in Pd2" listing (bin/scheme/main_menus.scm) reads.
 build_pd_externals() {
-
-    EXTERNALS_SRC="`pwd`/pd_externals"
-    BUILD_EXTERNAL="`pwd`/build_pd_external.sh"
-    EXTERNALS_DIR="${PD2_EXTERNALS_DIR:-`pwd`/../pd/externals}"
+    local EXTERNALS_SRC="$(pwd)/pd_externals"
+    local BUILD_EXTERNAL="$(pwd)/build_pd_external.sh"
+    local EXTERNALS_DIR="${PD2_EXTERNALS_DIR:-$(pwd)/../pd/externals}"
 
     if [ ! -f "$BUILD_EXTERNAL" ]; then
         echo "Missing $BUILD_EXTERNAL" >&2
@@ -353,30 +262,14 @@ build_pd_externals() {
     rm -rf "$EXTERNALS_DIR"
     mkdir -p "$EXTERNALS_DIR"
 
-    name=""
-    tarball=""
-    srcdir=""
-    flags=""
-    args=""
-    args_darwin=""
-    args_linux=""
-    args_windows=""
-    patches=""
-    exclude=""
-    install_dirs=""
-    cppflags=""
-    cflags=""
-    author=""
-    copyright=""
-    license=""
-    submodule_path=""
-    submodule_tarball=""
-    pd_externals_credits=""
+    local name="" tarball="" srcdir="" flags="" args=""
+    local args_darwin="" args_linux="" args_windows="" patches="" exclude=""
+    local install_dirs="" cppflags="" cflags="" author="" copyright="" license=""
+    local submodule_path="" submodule_tarball="" pd_externals_credits=""
 
     build_one() {
         [ -n "$name" ] || return 0
 
-        # For development: build only the named libraries.
         if [ -n "${PD2_EXTERNALS_ONLY:-}" ]; then
             case " $PD2_EXTERNALS_ONLY " in
                 *" $name "*) ;;
@@ -384,64 +277,55 @@ build_pd_externals() {
             esac
         fi
 
-        # Skip libraries that are known not to build for this target.
         if [ -n "${PD2_EXTERNALS_SKIP:-}" ]; then
             case " $PD2_EXTERNALS_SKIP " in
                 *" $name "*) return 0 ;;
             esac
         fi
 
-        # Extra arguments that only apply to one platform.
         case "${PD2_TARGET_OS:-$(uname -s)}" in
             Darwin)  args="$args $args_darwin" ;;
             Linux)   args="$args $args_linux" ;;
             Windows) args="$args $args_windows" ;;
         esac
 
-        echo
         echo "==== Building Pd external '$name' ===="
-
-        tarball_path="$EXTERNALS_SRC/$tarball"
+        local tarball_path="$EXTERNALS_SRC/$tarball"
         if [ ! -f "$tarball_path" ]; then
             echo "Tarball not found: $tarball_path" >&2
             exit 1
         fi
 
-
-        rm -rf "`pwd`/$srcdir"
+        rm -rf "$(pwd)/$srcdir"
         untar_allow_symlink_fail xzf "$tarball_path"
-        assert_dir "`pwd`/$srcdir"
-		
-        # Directories/files not wanted in the build can be listed in exclude.
+        assert_dir "$(pwd)/$srcdir"
+
         if [ -n "$exclude" ]; then
             for exclude_path in $exclude ; do
-                rm -rf "`pwd`/$srcdir/$exclude_path"
+                rm -rf "$(pwd)/$srcdir/$exclude_path"
             done
         fi
 
-        # Some projects use git submodules whose contents GitHub's archive
-        # does not contain. submodule_tarball is a separately pinned archive
-        # that is copied over submodule_path after extraction.
         if [ -n "$submodule_path" ]; then
-            sub_tarball_path="$EXTERNALS_SRC/$submodule_tarball"
+            local sub_tarball_path="$EXTERNALS_SRC/$submodule_tarball"
             if [ ! -f "$sub_tarball_path" ]; then
                 echo "Submodule tarball not found: $sub_tarball_path" >&2
                 exit 1
             fi
 
-            sub_tmpdir="`pwd`/.pd2-submodule-$$"
+            local sub_tmpdir="$(pwd)/.pd2-submodule-$$"
             rm -rf "$sub_tmpdir"
             mkdir -p "$sub_tmpdir"
             untar_allow_symlink_fail xzf "$sub_tarball_path" -C "$sub_tmpdir"
-            sub_source="`find "$sub_tmpdir" -mindepth 1 -maxdepth 1 -type d | head -n 1`"
+            local sub_source="$(find "$sub_tmpdir" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
             if [ -z "$sub_source" ] ; then
                 echo "Could not find the top-level directory in $submodule_tarball" >&2
                 rm -rf "$sub_tmpdir"
                 exit 1
             fi
-            rm -rf "`pwd`/$srcdir/$submodule_path"
-            mkdir -p "`pwd`/$srcdir/$submodule_path"
-            cp -a "$sub_source"/. "`pwd`/$srcdir/$submodule_path/"
+            rm -rf "$(pwd)/$srcdir/$submodule_path"
+            mkdir -p "$(pwd)/$srcdir/$submodule_path"
+            cp -a "$sub_source"/. "$(pwd)/$srcdir/$submodule_path/"
             rm -rf "$sub_tmpdir"
         fi
 
@@ -449,8 +333,7 @@ build_pd_externals() {
             patch -p1 -d "$srcdir" --batch --forward < "$EXTERNALS_SRC/$patch_file"
         done
 
-        # Word splitting of $flags, $args, $cppflags and $cflags is intentional.
-        BUILD_ENV=()
+        local BUILD_ENV=()
         if [ -n "$cppflags" ]; then
             BUILD_ENV+=("PD2_CPPFLAGS=$cppflags")
         fi
@@ -458,16 +341,12 @@ build_pd_externals() {
             BUILD_ENV+=("PD2_CFLAGS=$cflags")
         fi
 
-        # shellcheck disable=SC2086
-        env ${BUILD_ENV[@]+"${BUILD_ENV[@]}"} \
-            "$BUILD_EXTERNAL" $flags --dest "$EXTERNALS_DIR" --lib-name "$name" \
-            "`pwd`/$srcdir" $args
+        env ${BUILD_ENV[@]+"${BUILD_ENV[@]}"} "$BUILD_EXTERNAL" $flags --dest "$EXTERNALS_DIR" --lib-name "$name" "$(pwd)/$srcdir" $args
 
-        # Extra subdirectories (e.g. examples) shipped next to the library.
         if [ -n "$install_dirs" ]; then
             for extra_dir in $install_dirs ; do
-                if [ -d "`pwd`/$srcdir/$extra_dir" ]; then
-                    cp -a "`pwd`/$srcdir/$extra_dir" "$EXTERNALS_DIR/$name/"
+                if [ -d "$(pwd)/$srcdir/$extra_dir" ]; then
+                    cp -a "$(pwd)/$srcdir/$extra_dir" "$EXTERNALS_DIR/$name/"
                 else
                     echo "install_dirs entry not found: $srcdir/$extra_dir" >&2
                     exit 1
@@ -475,46 +354,25 @@ build_pd_externals() {
             done
         fi
 
-        # Credits for the "List of included Pd externals in Pd2" listing.
-        pd_externals_credits+="$name|$author|$copyright|$license
-"
+        pd_externals_credits+="$name|$author|$copyright|$license\n"
     }
 
     while IFS= read -r line || [ -n "$line" ] ; do
         line="${line%$'\r'}"
         case "$line" in
-            ""|\#*)
-                continue
-                ;;
-        esac
-        case "$line" in
+            ""|\#*) continue ;;
             \[*\])
                 build_one
                 name="${line#[}"
                 name="${name%]}"
-                tarball=""
-                srcdir=""
-                flags=""
-                args=""
-                args_darwin=""
-                args_linux=""
-                args_windows=""
-                patches=""
-                exclude=""
-                install_dirs=""
-                cppflags=""
-                cflags=""
-                author=""
-                copyright=""
-                license=""
-                submodule_path=""
-                submodule_tarball=""
+                tarball="" ; srcdir="" ; flags="" ; args=""
+                args_darwin="" ; args_linux="" ; args_windows="" ; patches="" ; exclude=""
+                install_dirs="" ; cppflags="" ; cflags="" ; author="" ; copyright="" ; license=""
+                submodule_path="" ; submodule_tarball=""
                 ;;
             *=*)
-                key="${line%%=*}"
-                value="${line#*=}"
-                key="`echo "$key" | tr -d '[:space:]'`"
-                value="`echo "$value" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'`"
+                local key=$(echo "${line%%=*}" | tr -d '[:space:]')
+                local value=$(echo "${line#*=}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
                 case "$key" in
                     tarball)          tarball="$value" ;;
                     srcdir)           srcdir="$value" ;;
@@ -539,23 +397,15 @@ build_pd_externals() {
     done < "$EXTERNALS_SRC/pd_externals.list"
     build_one
 
-    printf '%s' "$pd_externals_credits" > "$EXTERNALS_DIR/pd2-externals-credits.txt"
+    printf "%b" "$pd_externals_credits" > "$EXTERNALS_DIR/pd2-externals-credits.txt"
 
-    # Check the dynamic symbol tables of libpd and all installed externals for
-    # clashes. The externals are loaded with dlopen(RTLD_GLOBAL), so an
-    # external data symbol that libpd also defines (ggee's slider_widgetbehavior
-    # used to shadow the built-in [hsl]/[vsl] behavior) and ambiguous undefined
-    # references (load-order dependent) are real bugs. See
-    # pd_externals/check_symbol_clashes.sh.
     if [ -z "${PD2_SKIP_SYMBOL_CLASH_CHECK:-}" ]; then
         "$EXTERNALS_SRC/check_symbol_clashes.sh" --externals "$EXTERNALS_DIR"
     fi
 }
 
-
 build_qhttpserver() {
-
-    rm -fr qhttpserver-master
+    rm -rf qhttpserver-master
     untar_allow_symlink_fail xvzf qhttpserver-master.tar.gz
     assert_dir qhttpserver-master
     assert_file_exists qhttpserver-master/src/src.pro
@@ -571,7 +421,7 @@ build_qhttpserver() {
 
     cd src
     $QMAKE
-    make -j`nproc`
+    make -j$(nproc)
     cd ../..
 
     assert_file_exists qhttpserver-master/build/moc_qhttpconnection.cpp
@@ -579,19 +429,10 @@ build_qhttpserver() {
     assert_file_exists qhttpserver-master/lib/libqhttpserver.a
 }
 
-
-#rm -fr sndlib
-#tar xvzf sndlib.tar.gz
-#cd sndlib
-#patch -p0 <../sndlib.patch
-#cd ..
-
-
-#http://www.hpl.hp.com/personal/Hans_Boehm/gc/
 build_gc() {
-    GC_VERSION=8.2.8
-    LIBATOMIC_VERSION=7.8.0
-    rm -fr gc-$GC_VERSION libatomic_ops-$LIBATOMIC_VERSION
+    local GC_VERSION=8.2.8
+    local LIBATOMIC_VERSION=7.8.0
+    rm -rf gc-$GC_VERSION libatomic_ops-$LIBATOMIC_VERSION
     untar_allow_symlink_fail xvzf gc-$GC_VERSION.tar.gz
     untar_allow_symlink_fail xvzf libatomic_ops-$LIBATOMIC_VERSION.tar.gz
     assert_file_exists gc-$GC_VERSION/configure
@@ -604,13 +445,13 @@ build_gc() {
     fi
     assert_dir libatomic_ops/src
 
-    echo 'void RADIUM_ensure_bin_packages_gc_is_used(void){}' >>malloc.c
-    echo '#if defined(GC_ASSERTIONS) || !defined(NO_DEBUGGING)' >>malloc.c
-    echo "#error "nope"" >>malloc.c
-    echo "#endif" >>malloc.c
+    echo 'void RADIUM_ensure_bin_packages_gc_is_used(void){}' >> malloc.c
+    echo '#if defined(GC_ASSERTIONS) || !defined(NO_DEBUGGING)' >> malloc.c
+    echo '#error "nope"' >> malloc.c
+    echo '#endif' >> malloc.c
 
     CFLAGS="-mtune=generic -g -O2" ./configure --enable-static --disable-shared --disable-gc-debug --disable-gc-assertions
-    CFLAGS="-mtune=generic -g -O2" make -j`nproc`
+    CFLAGS="-mtune=generic -g -O2" make -j$(nproc)
     cd ..
 
     assert_file_exists gc-$GC_VERSION/.libs/libgc.a
@@ -618,19 +459,18 @@ build_gc() {
 }
 
 build_fluidsynth() {
-
-    rm -fr fluidsynth-1.1.6
+    rm -rf fluidsynth-1.1.6
     untar_allow_symlink_fail xvzf fluidsynth-1.1.6.tar.gz
     assert_file_exists fluidsynth-1.1.6/configure
 
     cd fluidsynth-1.1.6
-    make clean
 
-    local FS_CFLAGS='-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\"'
-    local FS_CPPFLAGS='-fPIC -fno-strict-aliasing -O3'
-    local FS_CXXFLAGS='-fPIC -fno-strict-aliasing -O3'
-    local FS_LDFLAGS=''
-    local FS_CONFIGURE_OPTS='--enable-static --disable-aufile-support --disable-pulse-support --disable-alsa-support --disable-libsndfile-support --disable-portaudio-support --disable-oss-support --disable-midishare --disable-jack-support --disable-coreaudio --disable-coremidi --disable-dart --disable-lash --disable-ladcca --disable-dbus-support --without-readline'
+    local FS_COMPAT_FLAGS="-std=gnu89 -Wno-error -Wno-incompatible-pointer-types -Wno-implicit-function-declaration -Wno-int-conversion -Wno-return-mismatch -Wno-deprecated-declarations"
+    local FS_CFLAGS="-fPIC -fno-strict-aliasing -O3 -DDEFAULT_SOUNDFONT=\\\"\\\" $FS_COMPAT_FLAGS"
+    local FS_CPPFLAGS="-fPIC -fno-strict-aliasing -O3"
+    local FS_CXXFLAGS="-fPIC -fno-strict-aliasing -O3"
+    local FS_LDFLAGS=""
+    local FS_CONFIGURE_OPTS="--enable-static --disable-shared --disable-aufile-support --disable-pulse-support --disable-alsa-support --disable-libsndfile-support --disable-portaudio-support --disable-oss-support --disable-midishare --disable-jack-support --disable-coreaudio --disable-coremidi --disable-dart --disable-lash --disable-ladcca --disable-dbus-support --without-readline"
 
     CFLAGS="$FS_CFLAGS" CPPFLAGS="$FS_CPPFLAGS" CXXFLAGS="$FS_CXXFLAGS" LDFLAGS="$FS_LDFLAGS" CC=$DASCC CXX=$DASCXX ./configure $FS_CONFIGURE_OPTS
 
@@ -639,124 +479,109 @@ build_fluidsynth() {
     local FS_M_CXXFLAGS="$FS_CXXFLAGS $DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
     local FS_M_LDFLAGS="$DARWIN_MIN_FLAGS $DARWIN_ARCH_FLAGS"
 
-    make -j`nproc` CFLAGS="$FS_M_CFLAGS" CPPFLAGS="$FS_M_CPPFLAGS" CXXFLAGS="$FS_M_CXXFLAGS" LDFLAGS="$FS_M_LDFLAGS"
-    cd ..
+    make -j$(nproc) -C src libfluidsynth.la CFLAGS="$FS_M_CFLAGS" CPPFLAGS="$FS_M_CPPFLAGS" CXXFLAGS="$FS_M_CXXFLAGS" LDFLAGS="$FS_M_LDFLAGS"
 
+    if [ -f src/libfluidsynth.a ] && [ ! -f src/.libs/libfluidsynth.a ]; then
+        mkdir -p src/.libs
+        cp -f src/libfluidsynth.a src/.libs/libfluidsynth.a
+    fi
+
+    cd ..
     assert_file_exists fluidsynth-1.1.6/src/.libs/libfluidsynth.a
 }
 
-build_libgig ()
-{
-	exit -1 # this stuff is done in the makefile now. The lines below are only kept for reference.
-	rm -fr libgig
-	tar xvjf libgig-4.2.0.tar.bz2
-	mv libgig-4.2.0 libgig
-	cd libgig
-	patch -p1 <../libgig_dont_check_loops.patch
-	patch -p1 <../libgig_win32.patch
-	make clean
-	CFLAGS="-O3 -fno-strict-aliasing" CPPFLAGS="-O3 -fno-strict-aliasing" CXXFLAGS="-O3 -fno-strict-aliasing" CC=$DASCC CXX=$DASCXX ./configure
-	CFLAGS="$CFLAGS" CPPFLAGS="$CPPFLAGS" CPPFLAGS="$CXXFLAGS" make -j8
-	cd ..
+build_libgig() {
+    exit -1
 }
 
-
 build_qscintilla() {
-    rm -fr QScintilla_gpl-2.10.8 QScintilla_src-2.14.0
+    rm -rf QScintilla_gpl-2.10.8 QScintilla_src-2.14.0
     untar_allow_symlink_fail xvzf QScintilla_src-2.14.0.tar.gz
     assert_file_exists QScintilla_src-2.14.0/src/qscintilla.pro
 
     cd QScintilla_src-2.14.0/src
     echo "CONFIG += staticlib" >> qscintilla.pro
-    if uname -s |grep Darwin ; then
+    echo "CONFIG -= debug_and_release" >> qscintilla.pro
+    echo "CONFIG -= debug" >> qscintilla.pro
+    echo "CONFIG += release" >> qscintilla.pro
+
+    if uname -s | grep Darwin >/dev/null ; then
         $QMAKE QMAKE_CFLAGS+="$DARWIN_ARCH_FLAGS" QMAKE_CXXFLAGS+="$DARWIN_ARCH_FLAGS" QMAKE_LFLAGS+="$DARWIN_ARCH_FLAGS"
         sed -i '' '/install_name_tool -id/d' Makefile
     else
         $QMAKE
     fi
-    patch -p0 <../../qscintilla.patch
-    make -j`nproc`
-    cd ../..
 
+    patch -p0 < ../../qscintilla.patch
+    make -j$(nproc)
+
+    if [ -f release/libqscintilla2_qt6.a ] && [ ! -f libqscintilla2_qt6.a ]; then
+        cp -f release/libqscintilla2_qt6.a libqscintilla2_qt6.a
+    fi
+
+    cd ../..
     assert_file_exists QScintilla_src-2.14.0/src/libqscintilla2_qt6.a
 }
 
-
-#if [[ $RADIUM_QT_VERSION == 5 ]]
-#then
-#    rm -fr qtstyleplugins-src-5.0.0/
-#    tar xvzf qtstyleplugins-src-5.0.0.tar.gz
-#    cd qtstyleplugins-src-5.0.0/
-#    `../../../find_moc_and_uic_paths.sh qmake`
-#    CFLAGS="$CFLAGS" CPPFLAGS="$CPPFLAGS" CPPFLAGS="$CXXFLAGS" make -j`nproc`
-#    cd ../
-#fi
-
 build_xcb() {
-    
     if ! is_0 ${RADIUM_BUILD_LIBXCB:-1} ; then
-		
-        rm -fr xcb-proto-1.13/
+        rm -rf xcb-proto-1.13/
         tar xvjf xcb-proto-1.13.tar.bz2
         cd xcb-proto-1.13/
         mkdir install
-        ./configure --prefix=`pwd`/install PYTHON=$PYTHONEXE
-        make -j`nproc`
+        ./configure --prefix=$(pwd)/install PYTHON=$PYTHONEXE
+        make -j$(nproc)
         make install
         cd ..
-        
-        rm -fr libxcb-1.13
-        tar xvjf libxcb-1.13.tar.bz2 
+
+        rm -rf libxcb-1.13
+        tar xvjf libxcb-1.13.tar.bz2
         cd libxcb-1.13
-        #patch -p1 <../libxcb-1.12.patch
-        export XCBPROTO_LIBS=`pwd`/../xcb-proto-1.13/install/lib # don't append to PKG_CONFIG_PATH because of set -u (or use default args)
+        export XCBPROTO_LIBS="$(pwd)/../xcb-proto-1.13/install/lib"
         export XCBPROTO_CFLAGS="$CFLAGS"
-        CFLAGS="$CFLAGS" CPPFLAGS="$CPPFLAGS" CPPFLAGS="$CXXFLAGS" ./configure PYTHON=$PYTHONEXE
-        CFLAGS="$CFLAGS" CPPFLAGS="$CPPFLAGS" CPPFLAGS="$CXXFLAGS" make -j`nproc`
+        CFLAGS="$CFLAGS" CPPFLAGS="$CPPFLAGS" CXXFLAGS="$CXXFLAGS" ./configure PYTHON=$PYTHONEXE
+        CFLAGS="$CFLAGS" CPPFLAGS="$CPPFLAGS" CXXFLAGS="$CXXFLAGS" make -j$(nproc)
         cd ..
-		
     fi
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]] ; then
+    setup_build_environment
 
-	setup_build_environment
+    source ./build_python27.sh
 
-	source ./build_python27.sh
+    build_faust
+    build_qhttpserver
+    build_gc
+    build_fluidsynth
+    build_python27
+    build_qscintilla
 
-	build_faust
-	build_qhttpserver
-	build_gc
-	build_fluidsynth
-	build_python27
-	build_qscintilla # Note: Linking fails on Mac. Just ignore it.
+    if uname -s | grep Linux >/dev/null ; then
+        if ! arch | grep -E "arm|aarch64" >/dev/null ; then
+            build_libpds
+        fi
+        build_xcb
+        echo "Finished compiling libpds and xcb"
+    fi
 
-	if uname -s |grep Linux ; then
-		if ! arch |grep -e arm -e aarch64 ; then
-		    build_libpds
-		fi
-		build_xcb
-		echo "Finished compiling libpds and xcb" # need this line to avoid script failing if all the lines above are commented out.
-	fi
+    build_libpd
+    build_pd_externals
+    echo "Finished building libpd and pd externals"
 
-	build_libpd
-	build_pd_externals
-	echo "Finished building libpd and pd externals" # need this line to avoid script failing if the line above is commented out.
-	
-	if uname -s |grep Linux ; then
-		if ! is_0 $INCLUDE_PD2DEV ; then
-			build_tcltk_wish_linux
-			echo "Finished installing the antialiased Tcl/Tk wish"
-		fi
-	elif uname -s |grep Darwin ; then
-		if ! is_0 $INCLUDE_PD2DEV ; then
-			build_tcltk_wish_darwin
-			echo "Finished building the Tcl/Tk Wish.app"
-		fi
-	fi
+    if uname -s | grep Linux >/dev/null ; then
+        if ! is_0 $INCLUDE_PD2DEV ; then
+            build_tcltk_wish_linux
+            echo "Finished installing the antialiased Tcl/Tk wish"
+        fi
+    elif uname -s | grep Darwin >/dev/null ; then
+        if ! is_0 $INCLUDE_PD2DEV ; then
+            build_tcltk_wish_darwin
+            echo "Finished building the Tcl/Tk Wish.app"
+        fi
+    fi
 
-
-	touch deletemetorebuild
+    touch deletemetorebuild
 fi
 
 echo "Success"
